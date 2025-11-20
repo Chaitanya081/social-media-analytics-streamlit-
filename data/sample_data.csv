@@ -1,0 +1,6 @@
+username,email,content,likes
+alice,alice@mail.com,"Hello World!",10
+bob,bob@mail.com,"Coffee time ☕",5
+carol,carol@mail.com,"New project launched!",8
+dave,dave@mail.com,"Good morning everyone!",4
+emma,emma@mail.com,"Exploring Streamlit today!",6
