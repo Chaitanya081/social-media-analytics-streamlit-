@@ -1,333 +1,224 @@
 import streamlit as st
 import sqlite3
 import pandas as pd
-import time
-import os
-import tempfile
 import hashlib
 from datetime import datetime
-from analytics.queries import create_indexes
 
-# -------------------------------------------------------
-# Streamlit Page Config
-# -------------------------------------------------------
+# ----------------------------------------------------------
+# PAGE CONFIG
+# ----------------------------------------------------------
 st.set_page_config(page_title="Social Media Analytics Platform", layout="wide")
-st.title("📊 Social Media Analytics Platform")
 
-# -------------------------------------------------------
-# Database Setup (Cloud Safe)
-# -------------------------------------------------------
-TEMP_DIR = tempfile.gettempdir()
-DB_PATH = os.path.join(TEMP_DIR, "social_media.db")
+# ----------------------------------------------------------
+# DATABASE + PASSWORD HASH
+# ----------------------------------------------------------
+DB = "social.db"
 
-def hash_password(password):
-    """Return SHA256 hash of a password."""
+def hash_pw(password):
     return hashlib.sha256(password.encode()).hexdigest()
 
-def ensure_database():
-    """Ensure DB and tables exist."""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
+def init_db():
+    conn = sqlite3.connect(DB)
+    cur = conn.cursor()
 
-    # Load schema
-    with open("db/schema.sql", "r") as f:
-        cursor.executescript(f.read())
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT,
+            email TEXT UNIQUE,
+            password TEXT
+        )
+    """)
 
-    # Create missing tables if not present
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS Comments (
-            comment_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            post_id INTEGER,
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS posts (
+            post_id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER,
             content TEXT,
             created_at TEXT
-        );
+        )
     """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS Relationships (
-            follower_id INTEGER,
-            following_id INTEGER
-        );
-    """)
-
-    # Add password column if missing
-    cursor.execute("PRAGMA table_info(Users);")
-    columns = [col[1] for col in cursor.fetchall()]
-    if "password" not in columns:
-        cursor.execute("ALTER TABLE Users ADD COLUMN password TEXT;")
-        conn.commit()
-
-    # Load sample data if empty
-    cursor.execute("SELECT COUNT(*) FROM Users;")
-    if cursor.fetchone()[0] == 0:
-        with open("db/sample_data.sql", "r") as f:
-            cursor.executescript(f.read())
 
     conn.commit()
     conn.close()
 
-ensure_database()
+init_db()
 
-# -------------------------------------------------------
-# Authentication Functions
-# -------------------------------------------------------
-def verify_user(email, password):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    hashed = hash_password(password)
-    cursor.execute("SELECT * FROM Users WHERE email=? AND password=?", (email, hashed))
-    user = cursor.fetchone()
-    conn.close()
-    return user
-
-def register_user(username, email, password):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    hashed = hash_password(password)
+# ----------------------------------------------------------
+# AUTH FUNCTIONS
+# ----------------------------------------------------------
+def register(username, email, password):
     try:
-        cursor.execute(
-            "INSERT INTO Users (username, email, password) VALUES (?, ?, ?);",
-            (username, email, hashed)
-        )
+        conn = sqlite3.connect(DB)
+        cur = conn.cursor()
+        cur.execute("INSERT INTO users (username, email, password) VALUES (?, ?, ?)",
+                    (username, email, hash_pw(password)))
         conn.commit()
         conn.close()
         return True
-    except Exception as e:
-        conn.close()
-        return str(e)
+    except:
+        return False
 
-# -------------------------------------------------------
-# Login Page
-# -------------------------------------------------------
-if "logged_in" not in st.session_state:
-    st.session_state.logged_in = False
+def login(email, password):
+    conn = sqlite3.connect(DB)
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM users WHERE email=? AND password=?",
+                (email, hash_pw(password)))
+    data = cur.fetchone()
+    conn.close()
+    return data
 
-if not st.session_state.logged_in:
-    st.sidebar.title("🔐 Login / Register")
+# ----------------------------------------------------------
+# LOGIN PAGE UI (FULL PAGE IMAGE)
+# ----------------------------------------------------------
+def login_page():
+
+    st.markdown("""
+        <style>
+            .main {
+                background-image: url('https://i.ibb.co/XYfksQt/social-bg.jpg');
+                background-size: cover;
+            }
+            .login-box {
+                background: rgba(0,0,0,0.65);
+                padding: 40px;
+                border-radius: 15px;
+                width: 450px;
+                margin: auto;
+                margin-top: 80px;
+            }
+            .title-text {
+                color: white;
+                text-align: center;
+                font-size: 35px;
+                font-weight: bold;
+            }
+            .subtitle {
+                text-align: center;
+                color: #ddd;
+                margin-bottom: 20px;
+            }
+        </style>
+    """, unsafe_allow_html=True)
+
+    st.markdown("<div class='login-box'>", unsafe_allow_html=True)
+    st.markdown("<div class='title-text'>SOCIAL MEDIA ANALYTICS PLATFORM</div>", unsafe_allow_html=True)
+    st.markdown("<div class='subtitle'>Welcome! Please log in to continue.</div>", unsafe_allow_html=True)
 
     tab1, tab2 = st.tabs(["🔑 Login", "🆕 Register"])
 
-    # ---- Login ----
     with tab1:
-        email = st.text_input("Enter Email:")
-        password = st.text_input("Enter Password:", type="password")
-
-        if st.button("Login"):
-            user = verify_user(email, password)
+        email = st.text_input("Email")
+        password = st.text_input("Password", type="password")
+        if st.button("Sign In"):
+            user = login(email, password)
             if user:
-                st.session_state.logged_in = True
-                st.session_state.username = user[1]
-                st.success(f"✅ Welcome {user[1]}!")
+                st.session_state.logged = True
+                st.session_state.user = user
                 st.rerun()
             else:
-                st.error("❌ Invalid email or password.")
+                st.error("Invalid credentials")
 
-    # ---- Register ----
     with tab2:
-        username = st.text_input("New Username:")
-        reg_email = st.text_input("New Email:")
-        reg_password = st.text_input("New Password:", type="password")
-
-        if st.button("Register"):
-            if username and reg_email and reg_password:
-                result = register_user(username, reg_email, reg_password)
-                if result is True:
-                    st.success("✅ Registration successful! You can now log in.")
-                else:
-                    st.error(f"⚠️ Error: {result}")
+        uname = st.text_input("New Username")
+        mail = st.text_input("New Email")
+        pw = st.text_input("New Password", type="password")
+        if st.button("Create Account"):
+            if register(uname, mail, pw):
+                st.success("Registration successful!")
             else:
-                st.warning("Please fill all fields.")
+                st.error("Email already exists!")
 
+    st.markdown("</div>", unsafe_allow_html=True)
+
+# ----------------------------------------------------------
+# DASHBOARD PAGE
+# ----------------------------------------------------------
+def dashboard():
+    st.title("📊 Dashboard")
+    st.write("Welcome to Social Media Analytics Dashboard!")
+
+# ----------------------------------------------------------
+# USER MANAGEMENT PAGE
+# ----------------------------------------------------------
+def user_management():
+    st.title("👤 Manage Users")
+
+    conn = sqlite3.connect(DB)
+    df = pd.read_sql_query("SELECT user_id, username, email FROM users", conn)
+    st.dataframe(df)
+    conn.close()
+
+# ----------------------------------------------------------
+# POST MANAGEMENT PAGE
+# ----------------------------------------------------------
+def post_management():
+    st.title("📝 Post Management")
+
+    conn = sqlite3.connect(DB)
+    cur = conn.cursor()
+
+    users = pd.read_sql_query("SELECT user_id, username FROM users", conn)
+
+    if not users.empty:
+        uid = st.selectbox("Select User", users['user_id'],
+                           format_func=lambda x: users[users.user_id == x].username.values[0])
+        content = st.text_area("Post Content")
+
+        if st.button("Add Post"):
+            cur.execute("INSERT INTO posts (user_id, content, created_at) VALUES (?, ?, ?)",
+                        (uid, content, str(datetime.now())))
+            conn.commit()
+            st.success("Post added successfully!")
+
+    df = pd.read_sql_query("SELECT * FROM posts", conn)
+    st.dataframe(df)
+    conn.close()
+
+# ----------------------------------------------------------
+# ANALYTICS PAGE
+# ----------------------------------------------------------
+def analytics_page():
+    st.title("📈 Analytics")
+
+    conn = sqlite3.connect(DB)
+    df = pd.read_sql_query("""
+        SELECT u.username, COUNT(p.post_id) AS posts
+        FROM users u
+        LEFT JOIN posts p ON u.user_id = p.user_id
+        GROUP BY u.user_id
+    """, conn)
+
+    st.bar_chart(df.set_index("username"))
+    conn.close()
+
+# ----------------------------------------------------------
+# MAIN APP
+# ----------------------------------------------------------
+if "logged" not in st.session_state:
+    st.session_state.logged = False
+
+if not st.session_state.logged:
+    login_page()
     st.stop()
 
-# -------------------------------------------------------
-# After Login
-# -------------------------------------------------------
-st.sidebar.success(f"👋 Logged in as {st.session_state.username}")
-if st.sidebar.button("🚪 Logout"):
-    st.session_state.logged_in = False
+# LEFT SIDEBAR
+st.sidebar.success(f"Logged in as {st.session_state.user[1]}")
+
+if st.sidebar.button("Logout"):
+    st.session_state.logged = False
     st.rerun()
 
-conn = sqlite3.connect(DB_PATH)
+# MODULE SELECTOR
+choice = st.sidebar.selectbox("Select Module", 
+                              ["Dashboard", "User Management", "Post Management", "Analytics"])
 
-choice = st.sidebar.selectbox(
-    "Select Module",
-    ["Database Overview", "Analytics", "Performance", "User Management", "Post Management"]
-)
-
-# -------------------------------------------------------
-# 1️⃣ Database Overview
-# -------------------------------------------------------
-if choice == "Database Overview":
-    st.subheader("User and Post Overview")
-    try:
-        users = pd.read_sql_query("SELECT user_id, username, email FROM Users;", conn)
-        posts = pd.read_sql_query("SELECT * FROM Posts;", conn)
-        st.write("### 👥 Users Table")
-        st.dataframe(users)
-        st.write("### 📝 Posts Table")
-        st.dataframe(posts)
-    except Exception as e:
-        st.error(f"⚠️ Failed to load tables: {e}")
-
-# -------------------------------------------------------
-# 2️⃣ Analytics (Fixed)
-# -------------------------------------------------------
-elif choice == "Analytics":
-    st.subheader("Complex Analytical Queries")
-
-    option = st.selectbox("Choose Analysis", [
-        "Most Active Users", "Top Influencers", "Trending Posts"
-    ])
-
-    start = time.time()
-
-    try:
-        if option == "Most Active Users":
-            query = """
-            SELECT u.username,
-                   COUNT(p.post_id) + COUNT(c.comment_id) AS total_activity
-            FROM Users u
-            LEFT JOIN Posts p ON u.user_id = p.user_id
-            LEFT JOIN Comments c ON u.user_id = c.user_id
-            GROUP BY u.username
-            ORDER BY total_activity DESC
-            LIMIT 10;
-            """
-            df = pd.read_sql_query(query, conn)
-            if not df.empty:
-                st.bar_chart(df.set_index("username"))
-            else:
-                st.warning("No data available for active users.")
-
-        elif option == "Top Influencers":
-            query = """
-            SELECT u.username, COUNT(r.following_id) AS followers
-            FROM Users u
-            JOIN Relationships r ON u.user_id = r.following_id
-            GROUP BY u.username
-            ORDER BY followers DESC
-            LIMIT 10;
-            """
-            df = pd.read_sql_query(query, conn)
-            if not df.empty:
-                st.bar_chart(df.set_index("username"))
-            else:
-                st.warning("No data available for influencers.")
-
-        elif option == "Trending Posts":
-            query = """
-            SELECT p.post_id, p.content,
-                   (p.likes + COUNT(c.comment_id)) AS engagement_score
-            FROM Posts p
-            LEFT JOIN Comments c ON p.post_id = c.post_id
-            GROUP BY p.post_id
-            ORDER BY engagement_score DESC
-            LIMIT 5;
-            """
-            df = pd.read_sql_query(query, conn)
-            if not df.empty:
-                st.dataframe(df)
-            else:
-                st.warning("No trending posts data available.")
-
-        st.info(f"⏱ Query executed in {round(time.time() - start, 4)} seconds")
-
-    except Exception as e:
-        st.error(f"⚠️ Query failed: {e}")
-
-# -------------------------------------------------------
-# 3️⃣ Performance (Fixed Output)
-# -------------------------------------------------------
-elif choice == "Performance":
-    st.subheader("Database Optimization and Benchmarking")
-
-    if st.button("Create Indexes for Optimization"):
-        try:
-            create_indexes(conn)
-            st.success("✅ Indexes created successfully!")
-        except Exception as e:
-            st.error(f"Index creation failed: {e}")
-
-    st.write("Compare query times before and after indexing:")
-    img_path = "data/performance_chart.png"
-
-    if os.path.exists(img_path):
-        st.image(img_path, caption="Query Performance Example")
-    else:
-        st.info("ℹ️ No chart available.")
-
-# -------------------------------------------------------
-# 4️⃣ User Management
-# -------------------------------------------------------
+# ROUTING
+if choice == "Dashboard":
+    dashboard()
 elif choice == "User Management":
-    st.subheader("👤 Manage Users")
-    df_users = pd.read_sql_query("SELECT user_id, username, email FROM Users;", conn)
-    st.dataframe(df_users)
-
-# -------------------------------------------------------
-# 5️⃣ Post Management (Manual Time Entry)
-# -------------------------------------------------------
+    user_management()
 elif choice == "Post Management":
-    st.subheader("📝 Manage Posts")
-
-    tab1, tab2 = st.tabs(["➕ Add Post", "❌ Delete Post"])
-
-    # ---- Add New Post ----
-    with tab1:
-        user_df = pd.read_sql_query("SELECT user_id, username FROM Users;", conn)
-        if not user_df.empty:
-            user_id = st.selectbox("Select User", user_df["user_id"],
-                                   format_func=lambda x: user_df.loc[user_df["user_id"] == x, "username"].values[0])
-            content = st.text_area("Enter post content:")
-            likes = st.number_input("Likes", min_value=0, value=0)
-
-            st.write("### Select Date and Enter Time Manually")
-            date_input = st.date_input("Date", datetime.now().date())
-            time_str = st.text_input("Enter Time (HH:MM:SS):", value=datetime.now().strftime("%H:%M:%S"))
-
-            # Validate time format
-            try:
-                datetime.strptime(time_str, "%H:%M:%S")
-                created_at = f"{date_input} {time_str}"
-            except ValueError:
-                st.warning("⚠️ Invalid time! Use HH:MM:SS (e.g., 14:45:00)")
-                created_at = None
-
-            if st.button("Add Post"):
-                if content and created_at:
-                    try:
-                        conn.execute(
-                            "INSERT INTO Posts (user_id, content, likes, created_at) VALUES (?, ?, ?, ?);",
-                            (user_id, content, likes, created_at)
-                        )
-                        conn.commit()
-                        st.success("✅ Post added successfully!")
-                    except Exception as e:
-                        st.error(f"⚠️ Failed to add post: {e}")
-                else:
-                    st.warning("Please enter valid post content and time.")
-        else:
-            st.warning("⚠️ No users found. Add a user first.")
-
-        st.write("### Existing Posts")
-        df_posts = pd.read_sql_query("SELECT * FROM Posts;", conn)
-        st.dataframe(df_posts)
-
-    # ---- Delete Post ----
-    with tab2:
-        posts_list = pd.read_sql_query("SELECT post_id, content FROM Posts;", conn)
-        if not posts_list.empty:
-            post_choice = st.selectbox("Select Post ID to delete:", posts_list["post_id"],
-                                       format_func=lambda x: posts_list.loc[posts_list["post_id"] == x, "content"].values[0])
-            if st.button("Delete Post"):
-                try:
-                    conn.execute("DELETE FROM Posts WHERE post_id = ?;", (post_choice,))
-                    conn.commit()
-                    st.success("🗑️ Post deleted successfully!")
-                except Exception as e:
-                    st.error(f"⚠️ Failed to delete post: {e}")
-        else:
-            st.info("No posts available to delete.")
-
-conn.close()
+    post_management()
+elif choice == "Analytics":
+    analytics_page()
