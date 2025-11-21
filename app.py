@@ -171,7 +171,7 @@ if choice == "Database Overview":
         st.error(f"⚠️ Failed to load tables: {e}")
 
 # -------------------------------------------------------
-# 2️⃣ Analytics
+# 2️⃣ Analytics (Fixed)
 # -------------------------------------------------------
 elif choice == "Analytics":
     st.subheader("Complex Analytical Queries")
@@ -237,7 +237,7 @@ elif choice == "Analytics":
         st.error(f"⚠️ Query failed: {e}")
 
 # -------------------------------------------------------
-# 3️⃣ Performance
+# 3️⃣ Performance (Fixed Output)
 # -------------------------------------------------------
 elif choice == "Performance":
     st.subheader("Database Optimization and Benchmarking")
@@ -258,103 +258,22 @@ elif choice == "Performance":
         st.info("ℹ️ No chart available.")
 
 # -------------------------------------------------------
-# 4️⃣ User Management (Full CRUD)
+# 4️⃣ User Management
 # -------------------------------------------------------
 elif choice == "User Management":
     st.subheader("👤 Manage Users")
-
-    tab1, tab2, tab3 = st.tabs(["➕ Add User", "🖊️ Edit User", "❌ Delete User"])
-
-    # ---- Add User ----
-    with tab1:
-        st.write("### Add a New User")
-        username = st.text_input("Enter Username:")
-        email = st.text_input("Enter Email:")
-        password = st.text_input("Enter Password:", type="password")
-
-        if st.button("Add User"):
-            if username and email and password:
-                try:
-                    hashed_pw = hashlib.sha256(password.encode()).hexdigest()
-                    conn.execute(
-                        "INSERT INTO Users (username, email, password) VALUES (?, ?, ?);",
-                        (username, email, hashed_pw)
-                    )
-                    conn.commit()
-                    st.success(f"✅ User '{username}' added successfully!")
-                except Exception as e:
-                    st.error(f"⚠️ Failed to add user: {e}")
-            else:
-                st.warning("Please fill all fields.")
-
-        st.write("### Existing Users")
-        df_users = pd.read_sql_query("SELECT user_id, username, email FROM Users;", conn)
-        st.dataframe(df_users)
-
-    # ---- Edit User ----
-    with tab2:
-        st.write("### Edit Existing User")
-        df_users = pd.read_sql_query("SELECT user_id, username, email FROM Users;", conn)
-        if not df_users.empty:
-            user_id = st.selectbox(
-                "Select User ID to Edit:",
-                df_users["user_id"],
-                format_func=lambda x: df_users.loc[df_users["user_id"] == x, "username"].values[0]
-            )
-            selected = df_users[df_users["user_id"] == user_id].iloc[0]
-            new_username = st.text_input("New Username:", value=selected["username"])
-            new_email = st.text_input("New Email:", value=selected["email"])
-            new_password = st.text_input("New Password (optional):", type="password")
-
-            if st.button("Update User"):
-                try:
-                    if new_password:
-                        hashed_pw = hashlib.sha256(new_password.encode()).hexdigest()
-                        conn.execute(
-                            "UPDATE Users SET username=?, email=?, password=? WHERE user_id=?;",
-                            (new_username, new_email, hashed_pw, user_id)
-                        )
-                    else:
-                        conn.execute(
-                            "UPDATE Users SET username=?, email=? WHERE user_id=?;",
-                            (new_username, new_email, user_id)
-                        )
-                    conn.commit()
-                    st.success(f"✅ User '{new_username}' updated successfully!")
-                except Exception as e:
-                    st.error(f"⚠️ Update failed: {e}")
-        else:
-            st.info("No users found to edit.")
-
-    # ---- Delete User ----
-    with tab3:
-        st.write("### Delete a User")
-        df_users = pd.read_sql_query("SELECT user_id, username FROM Users;", conn)
-        if not df_users.empty:
-            user_id = st.selectbox(
-                "Select User ID to Delete:",
-                df_users["user_id"],
-                format_func=lambda x: df_users.loc[df_users["user_id"] == x, "username"].values[0]
-            )
-            if st.button("Delete User"):
-                try:
-                    conn.execute("DELETE FROM Users WHERE user_id=?;", (user_id,))
-                    conn.commit()
-                    st.success("🗑️ User deleted successfully!")
-                except Exception as e:
-                    st.error(f"⚠️ Deletion failed: {e}")
-        else:
-            st.info("No users available to delete.")
+    df_users = pd.read_sql_query("SELECT user_id, username, email FROM Users;", conn)
+    st.dataframe(df_users)
 
 # -------------------------------------------------------
-# 5️⃣ Post Management
+# 5️⃣ Post Management (Manual Time Entry)
 # -------------------------------------------------------
 elif choice == "Post Management":
     st.subheader("📝 Manage Posts")
 
     tab1, tab2 = st.tabs(["➕ Add Post", "❌ Delete Post"])
 
-    # ---- Add Post ----
+    # ---- Add New Post ----
     with tab1:
         user_df = pd.read_sql_query("SELECT user_id, username FROM Users;", conn)
         if not user_df.empty:
@@ -362,14 +281,19 @@ elif choice == "Post Management":
                                    format_func=lambda x: user_df.loc[user_df["user_id"] == x, "username"].values[0])
             content = st.text_area("Enter post content:")
             likes = st.number_input("Likes", min_value=0, value=0)
+
+            st.write("### Select Date and Enter Time Manually")
             date_input = st.date_input("Date", datetime.now().date())
             time_str = st.text_input("Enter Time (HH:MM:SS):", value=datetime.now().strftime("%H:%M:%S"))
+
+            # Validate time format
             try:
                 datetime.strptime(time_str, "%H:%M:%S")
                 created_at = f"{date_input} {time_str}"
             except ValueError:
-                st.warning("⚠️ Invalid time format (use HH:MM:SS).")
+                st.warning("⚠️ Invalid time! Use HH:MM:SS (e.g., 14:45:00)")
                 created_at = None
+
             if st.button("Add Post"):
                 if content and created_at:
                     try:
@@ -381,24 +305,24 @@ elif choice == "Post Management":
                         st.success("✅ Post added successfully!")
                     except Exception as e:
                         st.error(f"⚠️ Failed to add post: {e}")
+                else:
+                    st.warning("Please enter valid post content and time.")
         else:
             st.warning("⚠️ No users found. Add a user first.")
 
         st.write("### Existing Posts")
-        st.dataframe(pd.read_sql_query("SELECT * FROM Posts;", conn))
+        df_posts = pd.read_sql_query("SELECT * FROM Posts;", conn)
+        st.dataframe(df_posts)
 
     # ---- Delete Post ----
     with tab2:
-        df_posts = pd.read_sql_query("SELECT post_id, content FROM Posts;", conn)
-        if not df_posts.empty:
-            post_id = st.selectbox(
-                "Select Post ID to Delete:",
-                df_posts["post_id"],
-                format_func=lambda x: df_posts.loc[df_posts["post_id"] == x, "content"].values[0]
-            )
+        posts_list = pd.read_sql_query("SELECT post_id, content FROM Posts;", conn)
+        if not posts_list.empty:
+            post_choice = st.selectbox("Select Post ID to delete:", posts_list["post_id"],
+                                       format_func=lambda x: posts_list.loc[posts_list["post_id"] == x, "content"].values[0])
             if st.button("Delete Post"):
                 try:
-                    conn.execute("DELETE FROM Posts WHERE post_id=?;", (post_id,))
+                    conn.execute("DELETE FROM Posts WHERE post_id = ?;", (post_choice,))
                     conn.commit()
                     st.success("🗑️ Post deleted successfully!")
                 except Exception as e:
