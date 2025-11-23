@@ -390,72 +390,210 @@ elif choice == "Performance":
 # ------------------------------
 elif choice == "User Management":
     open_card("User Management")
-    tabs = st.tabs(["➕ Add User", "🖊️ Edit User", "❌ Delete User", "View Users"])
+    tabs = st.tabs(["➕ Add User", "🖊️ Edit User", "❌ Delete User", "👥 View Users", "🔗 Manage Relationships"])
 
-    # Add
+    # Add User
     with tabs[0]:
-        a_name = st.text_input("Username", key="um_add_name")
-        a_email = st.text_input("Email", key="um_add_email")
-        a_pw = st.text_input("Password", type="password", key="um_add_pw")
-        if st.button("Add User"):
-            if not a_name or not a_email or not a_pw:
-                st.warning("Fill all fields.")
-            else:
-                res = register_user(a_name.strip(), a_email.strip(), a_pw)
-                if res is True:
-                    st.success("User added.")
+        st.subheader("Add New User")
+        with st.form("add_user_form", clear_on_submit=True):
+            a_name = st.text_input("Username", key="um_add_name")
+            a_email = st.text_input("Email", key="um_add_email")
+            a_pw = st.text_input("Password", type="password", key="um_add_pw")
+            submitted = st.form_submit_button("Add User")
+            if submitted:
+                if not a_name or not a_email or not a_pw:
+                    st.warning("Please fill all fields.")
                 else:
-                    st.error(res)
+                    res = register_user(a_name.strip(), a_email.strip(), a_pw)
+                    if res is True:
+                        st.success("User added successfully!")
+                        st.experimental_rerun()
+                    else:
+                        st.error(res)
 
-    # Edit
+    # Edit User
     with tabs[1]:
+        st.subheader("Edit Existing User")
         try:
             df_users = pd.read_sql_query("SELECT user_id, username, email FROM Users", conn)
         except Exception:
             df_users = pd.DataFrame(columns=["user_id", "username", "email"])
+        
         if not df_users.empty:
-            sel = st.selectbox("Select user", df_users["user_id"], format_func=lambda x: df_users.loc[df_users["user_id"]==x,"username"].values[0])
+            sel = st.selectbox("Select user", df_users["user_id"], 
+                              format_func=lambda x: f"{df_users.loc[df_users['user_id']==x,'username'].values[0]} (ID: {x})",
+                              key="edit_user_select")
             row = df_users[df_users["user_id"] == sel].iloc[0]
+            
             new_name = st.text_input("Username", value=row["username"], key="um_edit_name")
             new_email = st.text_input("Email", value=row["email"], key="um_edit_email")
-            new_pw = st.text_input("New password (leave empty to keep)", type="password", key="um_edit_pw")
-            if st.button("Update User"):
+            new_pw = st.text_input("New password (leave empty to keep current)", type="password", key="um_edit_pw")
+            
+            if st.button("Update User", key="update_user_btn"):
                 try:
                     if new_pw:
-                        conn.execute("UPDATE Users SET username=?, email=?, password=? WHERE user_id=?", (new_name.strip(), new_email.strip(), hash_password(new_pw), sel))
+                        conn.execute("UPDATE Users SET username=?, email=?, password=? WHERE user_id=?", 
+                                    (new_name.strip(), new_email.strip(), hash_password(new_pw), sel))
                     else:
-                        conn.execute("UPDATE Users SET username=?, email=? WHERE user_id=?", (new_name.strip(), new_email.strip(), sel))
+                        conn.execute("UPDATE Users SET username=?, email=? WHERE user_id=?", 
+                                    (new_name.strip(), new_email.strip(), sel))
                     conn.commit()
-                    st.success("User updated.")
+                    st.success("User updated successfully!")
+                    st.experimental_rerun()
                 except Exception as e:
                     st.error(f"Update failed: {e}")
         else:
-            st.info("No users found.")
+            st.info("No users found in the database.")
 
-    # Delete
+    # Delete User
     with tabs[2]:
+        st.subheader("Delete User")
         try:
             df_users = pd.read_sql_query("SELECT user_id, username FROM Users", conn)
         except Exception:
             df_users = pd.DataFrame(columns=["user_id", "username"])
+        
         if not df_users.empty:
-            sel_del = st.selectbox("Select user to delete", df_users["user_id"], format_func=lambda x: df_users.loc[df_users["user_id"]==x,"username"].values[0])
-            if st.button("Delete User"):
-                try:
-                    conn.execute("DELETE FROM Users WHERE user_id=?", (sel_del,))
-                    conn.commit()
-                    st.success("User deleted.")
-                except Exception as e:
-                    st.error(f"Deletion failed: {e}")
+            sel_del = st.selectbox("Select user to delete", df_users["user_id"], 
+                                  format_func=lambda x: f"{df_users.loc[df_users['user_id']==x,'username'].values[0]} (ID: {x})",
+                                  key="delete_user_select")
+            
+            # Show user details before deletion
+            if sel_del:
+                user_details = df_users[df_users["user_id"] == sel_del].iloc[0]
+                st.warning(f"You are about to delete user: **{user_details['username']}** (ID: {sel_del})")
+                
+                # Check if user has posts
+                post_count = pd.read_sql_query("SELECT COUNT(*) as count FROM Posts WHERE user_id=?", conn, params=(sel_del,)).iloc[0]['count']
+                if post_count > 0:
+                    st.warning(f"This user has {post_count} post(s) that will also be deleted!")
+                
+                if st.button("Confirm Delete", key="confirm_delete_btn"):
+                    try:
+                        # Delete user's posts first (to maintain referential integrity)
+                        conn.execute("DELETE FROM Posts WHERE user_id=?", (sel_del,))
+                        # Delete user's comments
+                        conn.execute("DELETE FROM Comments WHERE user_id=?", (sel_del,))
+                        # Delete user's relationships
+                        conn.execute("DELETE FROM Relationships WHERE follower_id=? OR following_id=?", (sel_del, sel_del))
+                        # Finally delete the user
+                        conn.execute("DELETE FROM Users WHERE user_id=?", (sel_del,))
+                        conn.commit()
+                        st.success("User and associated data deleted successfully!")
+                        st.experimental_rerun()
+                    except Exception as e:
+                        st.error(f"Deletion failed: {e}")
         else:
-            st.info("No users available.")
+            st.info("No users available for deletion.")
 
-    # View
+    # View Users
     with tabs[3]:
+        st.subheader("All Users")
         try:
-            st.dataframe(pd.read_sql_query("SELECT user_id, username, email, created_at FROM Users", conn))
-        except Exception:
-            st.dataframe(pd.read_sql_query("SELECT user_id, username, email FROM Users", conn))
+            users_df = pd.read_sql_query("""
+                SELECT u.user_id, u.username, u.email, u.created_at, 
+                       COUNT(DISTINCT p.post_id) as post_count,
+                       COUNT(DISTINCT r.following_id) as followers_count
+                FROM Users u
+                LEFT JOIN Posts p ON u.user_id = p.user_id
+                LEFT JOIN Relationships r ON u.user_id = r.following_id
+                GROUP BY u.user_id
+                ORDER BY u.user_id
+            """, conn)
+            
+            if not users_df.empty:
+                st.dataframe(users_df, use_container_width=True)
+                
+                # Statistics
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Total Users", len(users_df))
+                with col2:
+                    st.metric("Total Posts", users_df['post_count'].sum())
+                with col3:
+                    st.metric("Most Active User", 
+                             users_df.loc[users_df['post_count'].idxmax(), 'username'] if users_df['post_count'].max() > 0 else "N/A")
+            else:
+                st.info("No users found in the database.")
+        except Exception as e:
+            st.error(f"Error loading users: {e}")
+
+    # Manage Relationships
+    with tabs[4]:
+        st.subheader("Manage User Relationships")
+        
+        # Get all users
+        users_df = pd.read_sql_query("SELECT user_id, username FROM Users", conn)
+        
+        if len(users_df) >= 2:
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                follower = st.selectbox("Follower", users_df["user_id"], 
+                                       format_func=lambda x: f"{users_df.loc[users_df['user_id']==x,'username'].values[0]} (ID: {x})",
+                                       key="follower_select")
+            
+            with col2:
+                following = st.selectbox("Following", users_df["user_id"], 
+                                        format_func=lambda x: f"{users_df.loc[users_df['user_id']==x,'username'].values[0]} (ID: {x})",
+                                        key="following_select")
+            
+            if st.button("Create Relationship", key="create_relation_btn"):
+                if follower == following:
+                    st.error("A user cannot follow themselves!")
+                else:
+                    try:
+                        # Check if relationship already exists
+                        existing = pd.read_sql_query(
+                            "SELECT 1 FROM Relationships WHERE follower_id=? AND following_id=?", 
+                            conn, params=(follower, following)
+                        )
+                        
+                        if not existing.empty:
+                            st.warning("This relationship already exists!")
+                        else:
+                            conn.execute("INSERT INTO Relationships (follower_id, following_id) VALUES (?, ?)", 
+                                        (follower, following))
+                            conn.commit()
+                            st.success("Relationship created successfully!")
+                    except Exception as e:
+                        st.error(f"Failed to create relationship: {e}")
+            
+            # Show existing relationships
+            st.subheader("Existing Relationships")
+            relationships_df = pd.read_sql_query("""
+                SELECT r.follower_id, f.username as follower_name, 
+                       r.following_id, fl.username as following_name
+                FROM Relationships r
+                JOIN Users f ON r.follower_id = f.user_id
+                JOIN Users fl ON r.following_id = fl.user_id
+                ORDER BY f.username
+            """, conn)
+            
+            if not relationships_df.empty:
+                st.dataframe(relationships_df, use_container_width=True)
+                
+                # Option to delete a relationship
+                rel_to_delete = st.selectbox("Select relationship to delete", 
+                                           range(len(relationships_df)),
+                                           format_func=lambda x: f"{relationships_df.iloc[x]['follower_name']} → {relationships_df.iloc[x]['following_name']}",
+                                           key="delete_rel_select")
+                
+                if st.button("Delete Relationship", key="delete_rel_btn"):
+                    try:
+                        rel = relationships_df.iloc[rel_to_delete]
+                        conn.execute("DELETE FROM Relationships WHERE follower_id=? AND following_id=?", 
+                                    (rel['follower_id'], rel['following_id']))
+                        conn.commit()
+                        st.success("Relationship deleted successfully!")
+                        st.experimental_rerun()
+                    except Exception as e:
+                        st.error(f"Failed to delete relationship: {e}")
+            else:
+                st.info("No relationships found.")
+        else:
+            st.info("Need at least 2 users to manage relationships.")
+
     close_card()
 
 # ------------------------------
@@ -463,74 +601,140 @@ elif choice == "User Management":
 # ------------------------------
 elif choice == "Post Management":
     open_card("Post Management")
-    tabs = st.tabs(["➕ Add Post", "🖊️ Edit Post", "❌ Delete Post", "View Posts"])
+    tabs = st.tabs(["➕ Add Post", "🖊️ Edit Post", "❌ Delete Post", "📝 View Posts"])
 
     with tabs[0]:
+        st.subheader("Create New Post")
         users_df = pd.read_sql_query("SELECT user_id, username FROM Users", conn)
         if users_df.empty:
             st.info("No users found — add users first.")
         else:
-            uid = st.selectbox("Select Author", users_df["user_id"], format_func=lambda x: users_df.loc[users_df["user_id"]==x,"username"].values[0])
-            content = st.text_area("Content")
-            likes = st.number_input("Likes", min_value=0, value=0)
+            uid = st.selectbox("Select Author", users_df["user_id"], 
+                              format_func=lambda x: f"{users_df.loc[users_df['user_id']==x,'username'].values[0]} (ID: {x})",
+                              key="post_author_select")
+            content = st.text_area("Content", placeholder="Write your post content here...", height=150)
+            likes = st.number_input("Likes", min_value=0, value=0, key="post_likes")
+            
             # manual date + time entry
-            date_input = st.date_input("Date", datetime.now().date())
-            time_input = st.text_input("Time (HH:MM:SS)", value=datetime.now().strftime("%H:%M:%S"))
+            col1, col2 = st.columns(2)
+            with col1:
+                date_input = st.date_input("Date", datetime.now().date(), key="post_date")
+            with col2:
+                time_input = st.text_input("Time (HH:MM:SS)", value=datetime.now().strftime("%H:%M:%S"), key="post_time")
+            
             try:
                 datetime.strptime(time_input, "%H:%M:%S")
                 created_at = f"{date_input} {time_input}"
+                time_valid = True
             except ValueError:
                 created_at = None
+                time_valid = False
                 st.warning("Invalid time format. Use HH:MM:SS")
 
-            if st.button("Add Post"):
-                if not content or not created_at:
-                    st.warning("Provide content and valid time.")
+            if st.button("Add Post", key="add_post_btn"):
+                if not content:
+                    st.warning("Please provide post content.")
+                elif not time_valid:
+                    st.warning("Please provide a valid time format.")
                 else:
                     try:
                         conn.execute("INSERT INTO Posts (user_id, content, likes, created_at) VALUES (?, ?, ?, ?)",
                                      (uid, content, likes, created_at))
                         conn.commit()
-                        st.success("Post added.")
+                        st.success("Post added successfully!")
+                        st.experimental_rerun()
                     except Exception as e:
-                        st.error(f"Add failed: {e}")
+                        st.error(f"Failed to add post: {e}")
 
     with tabs[1]:
-        posts_df = pd.read_sql_query("SELECT post_id, content FROM Posts", conn)
+        st.subheader("Edit Existing Post")
+        posts_df = pd.read_sql_query("SELECT post_id, content, user_id FROM Posts", conn)
         if posts_df.empty:
             st.info("No posts to edit.")
         else:
-            pid = st.selectbox("Select post to edit", posts_df["post_id"], format_func=lambda x: posts_df.loc[posts_df["post_id"]==x,"content"].values[0])
+            pid = st.selectbox("Select post to edit", posts_df["post_id"], 
+                              format_func=lambda x: f"Post {x}: {posts_df.loc[posts_df['post_id']==x,'content'].values[0][:50]}...",
+                              key="edit_post_select")
             row = pd.read_sql_query("SELECT * FROM Posts WHERE post_id=?", conn, params=(pid,)).iloc[0]
-            new_content = st.text_area("Content", value=row["content"])
-            new_likes = st.number_input("Likes", min_value=0, value=int(row.get("likes", 0)))
-            if st.button("Update Post"):
+            
+            # Show current author
+            author_df = pd.read_sql_query("SELECT username FROM Users WHERE user_id=?", conn, params=(row['user_id'],))
+            current_author = author_df.iloc[0]['username'] if not author_df.empty else "Unknown"
+            st.info(f"Current author: {current_author} (ID: {row['user_id']})")
+            
+            new_content = st.text_area("Content", value=row["content"], height=150, key="edit_post_content")
+            new_likes = st.number_input("Likes", min_value=0, value=int(row.get("likes", 0)), key="edit_post_likes")
+            
+            if st.button("Update Post", key="update_post_btn"):
                 try:
                     conn.execute("UPDATE Posts SET content=?, likes=? WHERE post_id=?", (new_content, new_likes, pid))
                     conn.commit()
-                    st.success("Post updated.")
+                    st.success("Post updated successfully!")
+                    st.experimental_rerun()
                 except Exception as e:
                     st.error(f"Update failed: {e}")
 
     with tabs[2]:
-        posts_df = pd.read_sql_query("SELECT post_id, content FROM Posts", conn)
+        st.subheader("Delete Post")
+        posts_df = pd.read_sql_query("SELECT post_id, content, user_id FROM Posts", conn)
         if posts_df.empty:
             st.info("No posts to delete.")
         else:
-            pid_del = st.selectbox("Select post to delete", posts_df["post_id"], format_func=lambda x: posts_df.loc[posts_df["post_id"]==x,"content"].values[0])
-            if st.button("Delete Post"):
-                try:
-                    conn.execute("DELETE FROM Posts WHERE post_id=?", (pid_del,))
-                    conn.commit()
-                    st.success("Post deleted.")
-                except Exception as e:
-                    st.error(f"Delete failed: {e}")
+            pid_del = st.selectbox("Select post to delete", posts_df["post_id"], 
+                                  format_func=lambda x: f"Post {x}: {posts_df.loc[posts_df['post_id']==x,'content'].values[0][:50]}...",
+                                  key="delete_post_select")
+            
+            # Show post details before deletion
+            if pid_del:
+                post_details = posts_df[posts_df["post_id"] == pid_del].iloc[0]
+                st.warning(f"You are about to delete Post {pid_del}")
+                st.info(f"Content preview: {post_details['content'][:100]}...")
+                
+                # Check for comments
+                comment_count = pd.read_sql_query("SELECT COUNT(*) as count FROM Comments WHERE post_id=?", conn, params=(pid_del,)).iloc[0]['count']
+                if comment_count > 0:
+                    st.warning(f"This post has {comment_count} comment(s) that will also be deleted!")
+                
+                if st.button("Confirm Delete", key="confirm_post_delete_btn"):
+                    try:
+                        # Delete comments first
+                        conn.execute("DELETE FROM Comments WHERE post_id=?", (pid_del,))
+                        # Delete the post
+                        conn.execute("DELETE FROM Posts WHERE post_id=?", (pid_del,))
+                        conn.commit()
+                        st.success("Post and associated comments deleted successfully!")
+                        st.experimental_rerun()
+                    except Exception as e:
+                        st.error(f"Delete failed: {e}")
 
     with tabs[3]:
+        st.subheader("All Posts")
         try:
-            st.dataframe(pd.read_sql_query("SELECT * FROM Posts ORDER BY created_at DESC", conn))
-        except Exception:
-            st.dataframe(pd.read_sql_query("SELECT * FROM Posts", conn))
+            posts_df = pd.read_sql_query("""
+                SELECT p.post_id, p.user_id, u.username, p.content, p.likes, p.created_at,
+                       COUNT(c.comment_id) as comment_count
+                FROM Posts p
+                JOIN Users u ON p.user_id = u.user_id
+                LEFT JOIN Comments c ON p.post_id = c.post_id
+                GROUP BY p.post_id
+                ORDER BY p.created_at DESC
+            """, conn)
+            
+            if not posts_df.empty:
+                st.dataframe(posts_df, use_container_width=True)
+                
+                # Statistics
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Total Posts", len(posts_df))
+                with col2:
+                    st.metric("Total Likes", posts_df['likes'].sum())
+                with col3:
+                    st.metric("Most Liked Post", f"{posts_df['likes'].max()} likes")
+            else:
+                st.info("No posts found.")
+        except Exception as e:
+            st.error(f"Error loading posts: {e}")
 
     close_card()
 
