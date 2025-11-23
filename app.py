@@ -1,110 +1,115 @@
-# app.py -- final updated single-file app
+# app.py -- Final updated, clean login + full modules (no background image)
 import streamlit as st
 import sqlite3
 import pandas as pd
 import time
 import os
-import tempfile
 import hashlib
+import tempfile
 from datetime import datetime
 
-# try import create_indexes helper (optional)
+# If you have indexing helper in analytics/queries.py keep this import,
+# otherwise comment out or add a no-op function with same name.
 try:
     from analytics.queries import create_indexes
 except Exception:
-    def create_indexes(conn):
-        # fallback: no-op index creation to keep UI button working
+    def create_indexes(conn):  # fallback noop
         return
 
-# ----------------------------
-# Config
-# ----------------------------
+# -------------------------
+# Page config
+# -------------------------
 st.set_page_config(page_title="Social Media Analytics Platform", layout="wide")
 
-# Paths (works on Streamlit Cloud / local)
+# -------------------------
+# Paths & DB
+# -------------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_SCHEMA_PATH = os.path.join(BASE_DIR, "db", "schema.sql")
-DB_SAMPLE_PATH = os.path.join(BASE_DIR, "db", "sample_data.sql")
-TEMP_DIR = tempfile.gettempdir()
-DB_PATH = os.path.join(TEMP_DIR, "social_media.db")   # cloud-safe writable DB
+SCHEMA_SQL = os.path.join(BASE_DIR, "db", "schema.sql")
+SAMPLE_SQL = os.path.join(BASE_DIR, "db", "sample_data.sql")
 
-# ----------------------------
+# Use /tmp for writable persistent storage on cloud instances; if you prefer local file,
+# set DB_PATH = os.path.join(BASE_DIR, "social_media.db")
+DB_PATH = os.path.join(tempfile.gettempdir(), "social_media.db")
+
+# -------------------------
 # Utilities
-# ----------------------------
+# -------------------------
 def hash_password(password: str) -> str:
-    """Return SHA256 hex digest for password (simple hashing)."""
     return hashlib.sha256(password.encode()).hexdigest()
 
-def file_read_if_exists(path: str):
+def open_sql_file_safe(path):
+    """Return SQL text if path exists, else None (no exception)."""
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8") as f:
             return f.read()
     return None
 
-# ----------------------------
-# Database initialization (robust)
-# ----------------------------
+# -------------------------
+# Initialize DB (safe)
+# -------------------------
 def ensure_database():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
 
-    # If schema file exists, use it. Otherwise create fallback schema.
-    schema_sql = file_read_if_exists(DB_SCHEMA_PATH)
-    if schema_sql:
-        cur.executescript(schema_sql)
-    else:
-        # fallback minimal schema
-        cur.executescript("""
-        CREATE TABLE IF NOT EXISTS Users (
-            user_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT,
-            email TEXT UNIQUE,
-            created_at TEXT DEFAULT (datetime('now')),
-            password TEXT
-        );
-        CREATE TABLE IF NOT EXISTS Posts (
-            post_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            content TEXT,
-            likes INTEGER DEFAULT 0,
-            created_at TEXT
-        );
-        CREATE TABLE IF NOT EXISTS Comments (
-            comment_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            post_id INTEGER,
-            user_id INTEGER,
-            content TEXT,
-            created_at TEXT
-        );
-        CREATE TABLE IF NOT EXISTS Relationships (
-            follower_id INTEGER,
-            following_id INTEGER
-        );
+    # Try to load schema.sql if present; otherwise create minimal schema
+    schema_text = open_sql_file_safe(SCHEMA_SQL)
+    if schema_text:
+        try:
+            cur.executescript(schema_text)
+        except Exception:
+            # Fall back to minimal schema if user-provided schema fails
+            schema_text = None
+
+    if not schema_text:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS Users (
+                user_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT,
+                email TEXT UNIQUE,
+                password TEXT,
+                created_at TEXT DEFAULT (datetime('now'))
+            );
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS Posts (
+                post_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                content TEXT,
+                likes INTEGER DEFAULT 0,
+                created_at TEXT
+            );
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS Comments (
+                comment_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                post_id INTEGER,
+                user_id INTEGER,
+                content TEXT,
+                created_at TEXT
+            );
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS Relationships (
+                follower_id INTEGER,
+                following_id INTEGER
+            );
         """)
 
-    # Ensure password column exists (safe ALTER if needed)
-    cur.execute("PRAGMA table_info(Users);")
-    cols = [r[1] for r in cur.fetchall()]
-    if "password" not in cols:
-        try:
-            cur.execute("ALTER TABLE Users ADD COLUMN password TEXT;")
-        except Exception:
-            pass
-
-    # If Users table empty and sample SQL exists, load it
+    # If Users empty and sample_data.sql exists, load it
     cur.execute("SELECT COUNT(*) FROM Users;")
     try:
-        user_count = cur.fetchone()[0]
+        users_count = cur.fetchone()[0]
     except Exception:
-        user_count = 0
+        users_count = 0
 
-    if user_count == 0:
-        sample_sql = file_read_if_exists(DB_SAMPLE_PATH)
-        if sample_sql:
+    if users_count == 0:
+        sample_text = open_sql_file_safe(SAMPLE_SQL)
+        if sample_text:
             try:
-                cur.executescript(sample_sql)
+                cur.executescript(sample_text)
             except Exception:
-                # ignore sample loading errors
+                # ignore sample load failure
                 pass
 
     conn.commit()
@@ -112,148 +117,157 @@ def ensure_database():
 
 ensure_database()
 
-# ----------------------------
+# -------------------------
 # Auth helpers
-# ----------------------------
+# -------------------------
+def verify_user(email: str, password: str):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    hashed = hash_password(password)
+    cur.execute("SELECT user_id, username, email FROM Users WHERE email=? AND password=?", (email, hashed))
+    user = cur.fetchone()
+    conn.close()
+    return user
+
 def register_user(username: str, email: str, password: str):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     hashed = hash_password(password)
-    created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
         cur.execute(
-            "INSERT INTO Users (username, email, password, created_at) VALUES (?, ?, ?, ?);",
-            (username, email, hashed, created_at),
+            "INSERT INTO Users (username, email, password, created_at) VALUES (?, ?, ?, ?)",
+            (username, email, hashed, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
         )
         conn.commit()
         conn.close()
         return True
     except sqlite3.IntegrityError as e:
         conn.close()
-        return "This email is already registered."
+        return "Email already registered."
     except Exception as e:
         conn.close()
         return str(e)
 
-def verify_user(email: str, password: str):
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    hashed = hash_password(password)
-    cur.execute("SELECT user_id, username, email, created_at FROM Users WHERE email=? AND password=?", (email, hashed))
-    row = cur.fetchone()
-    conn.close()
-    return row  # None if not found
-
-# ----------------------------
-# Session state defaults
-# ----------------------------
+# -------------------------
+# Session-state defaults
+# -------------------------
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
 if "username" not in st.session_state:
     st.session_state.username = ""
-if "user_id" not in st.session_state:
-    st.session_state.user_id = None
+if "user_email" not in st.session_state:
+    st.session_state.user_email = ""
 
-# ----------------------------
-# Simple Login / Register page (no background image)
-# ----------------------------
+# -------------------------
+# Simple CSS (small)
+# -------------------------
+st.markdown("""
+    <style>
+    /* keep UI tidy */
+    .stApp { background-color: #0f1113; color: #e6e6e6; }
+    .login-title { font-size:30px; font-weight:800; margin-bottom:6px; color: #fff; }
+    .hero-sub { color: #cfcfcf; margin-bottom:14px; }
+    .glass-card { background: rgba(255,255,255,0.02); padding: 18px; border-radius: 10px; border: 1px solid rgba(255,255,255,0.03); }
+    </style>
+""", unsafe_allow_html=True)
+
+# -------------------------
+# LOGIN / REGISTER (CLEAN, NO IMAGE)
+# -------------------------
 if not st.session_state.logged_in:
     st.title("📊 Social Media Analytics Platform")
-    st.write("Welcome — please sign in or register to continue.")
+    st.markdown('<div class="hero-sub">Welcome! Please log in to continue.</div>', unsafe_allow_html=True)
 
-    login_tab, register_tab = st.tabs(["🔑 Login", "🆕 Register"])
+    tab_login, tab_register = st.tabs(["🔑 Login", "🆕 Register"])
 
-    with login_tab:
+    with tab_login:
         with st.form("login_form"):
             login_email = st.text_input("Email", key="login_email")
-            login_password = st.text_input("Password", type="password", key="login_password")
-            remember = st.checkbox("Remember me (session only)", key="remember_me")
+            login_pw = st.text_input("Password", type="password", key="login_pw")
+            remember = st.checkbox("Remember me (session only)")
             submitted = st.form_submit_button("Sign In")
+
             if submitted:
-                if not login_email or not login_password:
-                    st.warning("Please fill both email and password.")
+                if not login_email or not login_pw:
+                    st.warning("Please provide both email and password.")
                 else:
-                    user = verify_user(login_email.strip(), login_password)
-                    if user:
-                        # user is a tuple (user_id, username, email, created_at)
+                    u = verify_user(login_email.strip(), login_pw)
+                    if u:
                         st.session_state.logged_in = True
-                        st.session_state.user_id = user[0]
-                        st.session_state.username = user[1] or user[2]
+                        st.session_state.username = u[1] or login_email.strip()
+                        st.session_state.user_email = login_email.strip()
                         if remember:
-                            st.session_state.remembered = (user[2],)  # minimal session remember
-                        st.success(f"Login successful — welcome {st.session_state.username}!")
-                        # refresh UI (safe)
+                            st.session_state.remembered = (login_email.strip(), hash_password(login_pw))
+                        st.success(f"Login successful — Welcome {st.session_state.username}!")
+                        # refresh to show dashboard
                         st.experimental_rerun()
                     else:
-                        st.error("Invalid email or password. If you are newly registered, please enter the exact password you set.")
+                        st.error("Invalid email or password.")
 
-    with register_tab:
+    with tab_register:
         with st.form("register_form"):
-            reg_username = st.text_input("New Username", key="reg_username")
-            reg_email = st.text_input("New Email", key="reg_email")
-            reg_password = st.text_input("New Password", type="password", key="reg_password")
-            reg_submit = st.form_submit_button("Register")
-            if reg_submit:
-                if not (reg_username and reg_email and reg_password):
-                    st.warning("Please complete all fields.")
+            new_un = st.text_input("New Username", key="reg_un")
+            new_em = st.text_input("New Email", key="reg_em")
+            new_pw = st.text_input("New Password", type="password", key="reg_pw")
+            reg_sub = st.form_submit_button("Create account")
+            if reg_sub:
+                if not new_un or not new_em or not new_pw:
+                    st.warning("Please fill all fields.")
                 else:
-                    res = register_user(reg_username.strip(), reg_email.strip(), reg_password)
+                    res = register_user(new_un.strip(), new_em.strip(), new_pw)
                     if res is True:
-                        st.success("Registration successful! Now sign in with your credentials.")
+                        st.success("Registration successful! You can now log in.")
                     else:
-                        st.error(f"Registration failed: {res}")
+                        st.error(res)
 
-    st.stop()  # keep only login/register until authenticated
+    st.stop()  # keep login-only until user logs in
 
-# ----------------------------
-# Logged-in UI: Sidebar and main modules
-# ----------------------------
+# -------------------------
+# AFTER LOGIN: Sidebar + Modules
+# -------------------------
 st.sidebar.markdown(f"**👋 Logged in as**  \n**{st.session_state.username}**")
 if st.sidebar.button("🚪 Logout"):
-    # clear login state and rerun to show login page
     st.session_state.logged_in = False
     st.session_state.username = ""
-    st.session_state.user_id = None
+    st.session_state.user_email = ""
+    # keep DB and data; just rerun to show login
     st.experimental_rerun()
 
-# connect DB for app
+# open DB connection for modules
 conn = sqlite3.connect(DB_PATH)
 
-st.header(f"Welcome, {st.session_state.username}")
+# Sidebar module select
+choice = st.sidebar.selectbox("Select Module",
+                              ["Dashboard", "Database Overview", "Analytics", "Performance", "User Management", "Post Management"])
 
-choice = st.sidebar.selectbox("Select Module", ["Database Overview", "Analytics", "Performance", "User Management", "Post Management"])
+# Dashboard
+if choice == "Dashboard":
+    st.header(f"Welcome, {st.session_state.username}")
+    st.write("This is your dashboard area. Use the sidebar to choose modules.")
 
-# ----------------------------
-# 1) Database Overview
-# ----------------------------
-if choice == "Database Overview":
-    st.subheader("Database Overview")
+# Database Overview
+elif choice == "Database Overview":
+    st.header("User and Post Overview")
     try:
-        df_users = pd.read_sql_query("SELECT user_id, username, email, created_at FROM Users ORDER BY user_id;", conn)
-        st.write("### 👥 Users")
-        st.dataframe(df_users)
+        users_df = pd.read_sql_query("SELECT user_id, username, email, created_at FROM Users ORDER BY user_id;", conn)
+        posts_df = pd.read_sql_query("SELECT * FROM Posts ORDER BY created_at DESC;", conn)
+        st.subheader("👥 Users")
+        st.dataframe(users_df)
+        st.subheader("📝 Posts")
+        st.dataframe(posts_df)
     except Exception as e:
-        st.error(f"Failed to read Users table: {e}")
+        st.error(f"Failed to read tables: {e}")
 
-    try:
-        df_posts = pd.read_sql_query("SELECT * FROM Posts ORDER BY created_at DESC;", conn)
-        st.write("### 📝 Posts")
-        st.dataframe(df_posts)
-    except Exception as e:
-        st.info("No Posts table or no posts yet.")
-
-# ----------------------------
-# 2) Analytics
-# ----------------------------
+# Analytics
 elif choice == "Analytics":
-    st.subheader("Analytics")
+    st.header("Analytics")
     opt = st.selectbox("Choose Analysis", ["Most Active Users", "Top Influencers", "Trending Posts"])
-    start = time.time()
-
+    start_t = time.time()
     try:
         if opt == "Most Active Users":
             q = """
-            SELECT u.username, (COUNT(p.post_id) + COUNT(c.comment_id)) AS total_activity
+            SELECT u.username, 
+                   (COUNT(p.post_id) + COUNT(c.comment_id)) AS total_activity
             FROM Users u
             LEFT JOIN Posts p ON u.user_id = p.user_id
             LEFT JOIN Comments c ON u.user_id = c.user_id
@@ -262,10 +276,10 @@ elif choice == "Analytics":
             LIMIT 10;
             """
             df = pd.read_sql_query(q, conn)
-            if df.empty:
-                st.info("No activity data.")
-            else:
+            if not df.empty:
                 st.bar_chart(df.set_index("username"))
+            else:
+                st.info("No activity data.")
         elif opt == "Top Influencers":
             q = """
             SELECT u.username, COUNT(r.following_id) AS followers
@@ -276,11 +290,11 @@ elif choice == "Analytics":
             LIMIT 10;
             """
             df = pd.read_sql_query(q, conn)
-            if df.empty:
-                st.info("No relationships data.")
-            else:
+            if not df.empty:
                 st.bar_chart(df.set_index("username"))
-        else:  # Trending Posts
+            else:
+                st.info("No relationships data.")
+        elif opt == "Trending Posts":
             q = """
             SELECT p.post_id, p.content, (p.likes + COUNT(c.comment_id)) AS engagement_score
             FROM Posts p
@@ -290,134 +304,99 @@ elif choice == "Analytics":
             LIMIT 5;
             """
             df = pd.read_sql_query(q, conn)
-            if df.empty:
-                st.info("No trending posts.")
-            else:
+            if not df.empty:
                 st.dataframe(df)
+            else:
+                st.info("No trending posts.")
     except Exception as e:
         st.error(f"Analytics error: {e}")
+    st.info(f"Query time: {round(time.time() - start_t, 4)}s")
 
-    st.info(f"Query time: {round(time.time() - start, 4)}s")
-
-# ----------------------------
-# 3) Performance
-# ----------------------------
+# Performance
 elif choice == "Performance":
-    st.subheader("Performance")
+    st.header("Performance")
     if st.button("Create Indexes for Optimization"):
         try:
             create_indexes(conn)
-            st.success("Indexes created (or function ran).")
+            st.success("Indexes created.")
         except Exception as e:
-            st.error(f"Index creation failed: {e}")
+            st.error(f"Indexing failed: {e}")
 
-# ----------------------------
-# 4) User Management
-# ----------------------------
+# User Management
 elif choice == "User Management":
-    st.subheader("User Management")
+    st.header("Manage Users")
 
-    tab_add, tab_edit, tab_delete, tab_view = st.tabs(["Add User", "Edit User", "Delete User", "View Users"])
-
-    with tab_add:
-        a_un = st.text_input("Username (new)", key="um_add_un")
-        a_em = st.text_input("Email (new)", key="um_add_em")
-        a_pw = st.text_input("Password (new)", type="password", key="um_add_pw")
-        if st.button("Add User"):
-            if a_un and a_em and a_pw:
-                res = register_user(a_un.strip(), a_em.strip(), a_pw)
+    # Add user form (works in-app)
+    with st.form("add_user_form"):
+        st.subheader("➕ Add User")
+        au_name = st.text_input("Username", key="au_name")
+        au_email = st.text_input("Email", key="au_email")
+        au_pw = st.text_input("Password", type="password", key="au_pw")
+        au_submit = st.form_submit_button("Add User")
+        if au_submit:
+            if not (au_name and au_email and au_pw):
+                st.warning("Please fill all fields to add a user.")
+            else:
+                res = register_user(au_name.strip(), au_email.strip(), au_pw)
                 if res is True:
                     st.success("User added.")
                 else:
                     st.error(res)
-            else:
-                st.warning("Fill all fields.")
 
-    with tab_edit:
-        try:
-            users_df = pd.read_sql_query("SELECT user_id, username, email FROM Users ORDER BY user_id;", conn)
-        except Exception:
-            users_df = pd.DataFrame()
-        if users_df.empty:
-            st.info("No users available.")
-        else:
-            uid = st.selectbox("Select user to edit", users_df["user_id"], format_func=lambda x: users_df.loc[users_df["user_id"]==x,"username"].values[0])
-            row = users_df[users_df["user_id"]==uid].iloc[0]
-            new_un = st.text_input("Username", value=row["username"], key="um_edit_un")
-            new_em = st.text_input("Email", value=row["email"], key="um_edit_em")
-            new_pw = st.text_input("New Password (leave blank to keep)", type="password", key="um_edit_pw")
-            if st.button("Update User"):
-                try:
-                    if new_pw:
-                        conn.execute("UPDATE Users SET username=?, email=?, password=? WHERE user_id=?", (new_un.strip(), new_em.strip(), hash_password(new_pw), uid))
-                    else:
-                        conn.execute("UPDATE Users SET username=?, email=? WHERE user_id=?", (new_un.strip(), new_em.strip(), uid))
-                    conn.commit()
-                    st.success("User updated.")
-                except Exception as e:
-                    st.error(f"Update failed: {e}")
+    st.markdown("---")
+    # List / Edit / Delete user simple view
+    try:
+        df_users = pd.read_sql_query("SELECT user_id, username, email, created_at FROM Users ORDER BY user_id;", conn)
+        st.subheader("Existing Users")
+        st.dataframe(df_users)
+    except Exception as e:
+        st.error(f"Could not load users: {e}")
 
-    with tab_delete:
-        try:
-            users_df = pd.read_sql_query("SELECT user_id, username FROM Users ORDER BY user_id;", conn)
-        except Exception:
-            users_df = pd.DataFrame()
-        if users_df.empty:
-            st.info("No users to delete.")
-        else:
-            uid = st.selectbox("Select user to delete", users_df["user_id"], format_func=lambda x: users_df.loc[users_df["user_id"]==x,"username"].values[0])
-            if st.button("Delete User"):
-                try:
-                    conn.execute("DELETE FROM Users WHERE user_id=?", (uid,))
-                    conn.commit()
-                    st.success("User deleted.")
-                except Exception as e:
-                    st.error(f"Deletion failed: {e}")
-
-    with tab_view:
-        try:
-            st.dataframe(pd.read_sql_query("SELECT user_id, username, email, created_at FROM Users ORDER BY user_id;", conn))
-        except Exception as e:
-            st.error(f"Could not fetch users: {e}")
-
-# ----------------------------
-# 5) Post Management
-# ----------------------------
+# Post Management
 elif choice == "Post Management":
-    st.subheader("Post Management")
-    tab1, tab2 = st.tabs(["Add Post", "Delete Post"])
+    st.header("Post Management")
+    tab1, tab2 = st.tabs(["➕ Add Post", "❌ Delete Post"])
 
     with tab1:
         users_df = pd.read_sql_query("SELECT user_id, username FROM Users ORDER BY user_id;", conn)
         if users_df.empty:
-            st.info("No users present — add users first.")
+            st.info("No users found. Add users first.")
         else:
-            uid = st.selectbox("Select User", users_df["user_id"], format_func=lambda x: users_df.loc[users_df["user_id"]==x,"username"].values[0])
-            content = st.text_area("Post content")
+            uid = st.selectbox("Select User", users_df["user_id"],
+                               format_func=lambda x: users_df.loc[users_df["user_id"] == x, "username"].values[0])
+            content = st.text_area("Content")
             likes = st.number_input("Likes", min_value=0, value=0)
             date_input = st.date_input("Date", datetime.now().date())
-            time_input = st.time_input("Time", datetime.now().time())
-            created_at = f"{date_input} {time_input}"
-            if st.button("Add Post"):
-                try:
-                    conn.execute("INSERT INTO Posts (user_id, content, likes, created_at) VALUES (?, ?, ?, ?);", (uid, content, likes, created_at))
-                    conn.commit()
-                    st.success("Post added.")
-                except Exception as e:
-                    st.error(f"Failed to add post: {e}")
+            time_input = st.text_input("Time (HH:MM:SS)", value=datetime.now().strftime("%H:%M:%S"))
+            try:
+                datetime.strptime(time_input, "%H:%M:%S")
+                created_at = f"{date_input} {time_input}"
+            except Exception:
+                created_at = None
+                st.warning("Invalid time format: use HH:MM:SS")
 
-        try:
-            st.write("Existing posts")
-            st.dataframe(pd.read_sql_query("SELECT * FROM Posts ORDER BY created_at DESC;", conn))
-        except Exception:
-            st.info("No posts yet.")
+            if st.button("Add Post"):
+                if content and created_at:
+                    try:
+                        conn.execute("INSERT INTO Posts (user_id, content, likes, created_at) VALUES (?, ?, ?, ?)",
+                                     (uid, content, likes, created_at))
+                        conn.commit()
+                        st.success("Post added.")
+                    except Exception as e:
+                        st.error(f"Add failed: {e}")
+                else:
+                    st.warning("Provide content and valid time.")
+
+        st.markdown("### All posts")
+        st.dataframe(pd.read_sql_query("SELECT * FROM Posts ORDER BY created_at DESC;", conn))
 
     with tab2:
-        posts_df = pd.read_sql_query("SELECT post_id, content FROM Posts ORDER BY post_id;", conn)
+        posts_df = pd.read_sql_query("SELECT post_id, content FROM Posts ORDER BY post_id DESC;", conn)
         if posts_df.empty:
             st.info("No posts to delete.")
         else:
-            pid = st.selectbox("Select Post", posts_df["post_id"], format_func=lambda x: posts_df.loc[posts_df["post_id"]==x,"content"].values[0])
+            pid = st.selectbox("Select post to delete", posts_df["post_id"],
+                               format_func=lambda x: posts_df.loc[posts_df["post_id"] == x, "content"].values[0])
             if st.button("Delete Post"):
                 try:
                     conn.execute("DELETE FROM Posts WHERE post_id=?", (pid,))
@@ -426,7 +405,7 @@ elif choice == "Post Management":
                 except Exception as e:
                     st.error(f"Delete failed: {e}")
 
-# ----------------------------
+# -------------------------
 # Close DB
-# ----------------------------
+# -------------------------
 conn.close()
