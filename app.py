@@ -1,252 +1,156 @@
-# app.py
-# Final updated, working Social Media Analytics Streamlit app (Option B: full-login background)
+# app.py -- Final updated, fully working Streamlit app
 # Features:
-# - Full background image on the LOGIN page (uses data/SocialMedia1.png if present)
-# - Clean Login / Register tabs (prevents duplicate registration)
-# - DB stored at data/social_media.db if possible; falls back to temp dir
-# - Add / Edit / Delete users and posts (CRUD)
-# - Analytics / Performance modules preserved
-# - Manual time entry for posts (HH:MM:SS) + validation
-# - Passwords hashed with SHA256
-# - Robust: creates schema if schema/sql files missing
+# - Simple clean Login/Register (no background image)
+# - Persistent SQLite DB stored in system temp directory (works on Streamlit Cloud)
+# - Users: add / edit / delete (from User Management)
+# - Posts: add / edit / delete; Posts list shows the username who created each post
+# - Safe handling when db/schema.sql or db/sample_data.sql are missing (fallback schema & sample data)
+# - Passwords stored hashed (SHA256)
+#
+# Place this file at your repo root alongside the 'db' folder (optional). If db/schema.sql exists it will be used;
+# otherwise built-in fallback schema will be created automatically.
 
 import streamlit as st
 import sqlite3
 import pandas as pd
-import time
 import os
 import tempfile
 import hashlib
-from datetime import datetime
+from datetime import datetime, time as dtime
 
-# Try to import create_indexes if analytics module exists
+# Optional helper import used previously by you; if absent, the button will still work (create_indexes is optional).
 try:
-    from analytics.queries import create_indexes
+    from analytics.queries import create_indexes  # optional
 except Exception:
     def create_indexes(conn):
-        # fallback: create some simple indexes if tables exist
-        try:
-            c = conn.cursor()
-            c.execute("CREATE INDEX IF NOT EXISTS idx_posts_user ON Posts(user_id);")
-            c.execute("CREATE INDEX IF NOT EXISTS idx_posts_created ON Posts(created_at);")
-            conn.commit()
-        except Exception:
-            pass
-
-# -----------------------
-# Config + paths
-# -----------------------
-st.set_page_config(page_title="Social Media Analytics Platform", layout="wide")
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.path.join(BASE_DIR, "data")
-os.makedirs(DATA_DIR, exist_ok=True)
-
-# Prefer repository DB file (so registrations persist if writable there), else fallback to temp
-DB_FILE_REPO = os.path.join(DATA_DIR, "social_media.db")
-TEMP_DB = os.path.join(tempfile.gettempdir(), "social_media.db")
-DB_PATH = DB_FILE_REPO if os.access(DATA_DIR, os.W_OK) else TEMP_DB
-
-# Banner image path (login background). Use data/SocialMedia1.png as requested.
-BANNER_FILE = os.path.join("data", "SocialMedia1.png")  # relative path for repo
-
-# -----------------------
-# Utility functions
-# -----------------------
-def sha256(s: str) -> str:
-    return hashlib.sha256(s.encode()).hexdigest()
-
-def get_conn():
-    return sqlite3.connect(DB_PATH, check_same_thread=False)
-
-# -----------------------
-# Ensure DB schema (robust: fallback schema if files missing)
-# -----------------------
-def ensure_database():
-    conn = get_conn()
-    c = conn.cursor()
-
-    # If db/schema.sql exists in repo, use it; otherwise create minimal schema
-    schema_path = os.path.join(BASE_DIR, "db", "schema.sql")
-    if os.path.exists(schema_path):
-        try:
-            with open(schema_path, "r") as f:
-                c.executescript(f.read())
-        except Exception:
-            pass
-
-    # Minimal fallback schema (safe to run even if tables exist)
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS Users (
-            user_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT,
-            email TEXT UNIQUE,
-            created_at TEXT DEFAULT (datetime('now')),
-            password TEXT
-        );
-    """)
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS Posts (
-            post_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            content TEXT,
-            likes INTEGER DEFAULT 0,
-            created_at TEXT
-        );
-    """)
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS Comments (
-            comment_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            post_id INTEGER,
-            user_id INTEGER,
-            content TEXT,
-            created_at TEXT
-        );
-    """)
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS Relationships (
-            follower_id INTEGER,
-            following_id INTEGER
-        );
-    """)
-    conn.commit()
-
-    # If sample_data.sql exists and Users empty, load it
-    sample_path = os.path.join(BASE_DIR, "db", "sample_data.sql")
-    try:
-        c.execute("SELECT COUNT(*) FROM Users;")
-        cnt = c.fetchone()[0]
-    except Exception:
-        cnt = 0
-
-    if cnt == 0 and os.path.exists(sample_path):
-        try:
-            with open(sample_path, "r") as f:
-                c.executescript(f.read())
-            conn.commit()
-        except Exception:
-            pass
-
-    # Ensure password column present (PRAGMA idempotent)
-    try:
-        c.execute("PRAGMA table_info(Users);")
-        cols = [r[1] for r in c.fetchall()]
-        if "password" not in cols:
-            c.execute("ALTER TABLE Users ADD COLUMN password TEXT;")
-            conn.commit()
-    except Exception:
+        # noop fallback
         pass
 
+# -------------------------
+# Configuration / DB paths
+# -------------------------
+st.set_page_config(page_title="Social Media Analytics Platform", layout="wide")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+SCHEMA_PATH = os.path.join(BASE_DIR, "db", "schema.sql")
+SAMPLE_PATH = os.path.join(BASE_DIR, "db", "sample_data.sql")
+TEMP_DIR = tempfile.gettempdir()
+DB_PATH = os.path.join(TEMP_DIR, "social_media.db")  # persistent across runs on same machine/container
+
+# -------------------------
+# Utilities
+# -------------------------
+def hash_password(pw: str) -> str:
+    return hashlib.sha256(pw.encode()).hexdigest()
+
+def open_conn():
+    return sqlite3.connect(DB_PATH, check_same_thread=False)
+
+# -------------------------
+# DB initialization
+# -------------------------
+def ensure_database():
+    conn = open_conn()
+    cur = conn.cursor()
+
+    # If user provided schema file, use it; otherwise use fallback schema.
+    if os.path.exists(SCHEMA_PATH):
+        with open(SCHEMA_PATH, "r", encoding="utf-8") as f:
+            sql = f.read()
+            cur.executescript(sql)
+    else:
+        # fallback schema
+        cur.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS Users (
+                user_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT,
+                email TEXT UNIQUE,
+                created_at TEXT DEFAULT (datetime('now')),
+                password TEXT
+            );
+            CREATE TABLE IF NOT EXISTS Posts (
+                post_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                content TEXT,
+                likes INTEGER DEFAULT 0,
+                created_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS Comments (
+                comment_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                post_id INTEGER,
+                user_id INTEGER,
+                content TEXT,
+                created_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS Relationships (
+                follower_id INTEGER,
+                following_id INTEGER
+            );
+            """
+        )
+
+    # If DB empty and sample_data exists, load it; otherwise optional builtin sample
+    cur.execute("SELECT COUNT(*) FROM Users;")
+    cnt = cur.fetchone()[0]
+    if cnt == 0:
+        if os.path.exists(SAMPLE_PATH):
+            with open(SAMPLE_PATH, "r", encoding="utf-8") as f:
+                cur.executescript(f.read())
+        else:
+            # small builtin sample data
+            cur.executescript(
+                f"""
+                INSERT OR IGNORE INTO Users (username, email, password, created_at)
+                  VALUES
+                  ('Alice', 'alice@example.com', '{hash_password("alice123")}', datetime('now')),
+                  ('Bob', 'bob@example.com', '{hash_password("bob123")}', datetime('now')),
+                  ('Charlie', 'charlie@example.com', '{hash_password("charlie123")}', datetime('now')),
+                  ('G Chaitanya', 'chaithanya06gutti@gmail.com', '{hash_password("project123")}', datetime('now'));
+                INSERT OR IGNORE INTO Posts (user_id, content, likes, created_at)
+                  VALUES
+                  (1, 'Hello World!', 5, '2024-01-15 10:22:00'),
+                  (2, 'My first post!', 12, '2024-02-20 15:45:00'),
+                  (3, 'Nice weather today!', 7, '2024-03-01 09:10:00');
+                """
+            )
+
+    conn.commit()
     conn.close()
 
 ensure_database()
 
-# -----------------------
-# Auth helpers
-# -----------------------
-def user_by_email(email: str):
-    conn = get_conn()
-    c = conn.cursor()
-    c.execute("SELECT user_id, username, email FROM Users WHERE email=?", (email,))
-    row = c.fetchone()
-    conn.close()
-    return row
-
+# -------------------------
+# Auth and data functions
+# -------------------------
 def verify_user(email: str, password: str):
-    conn = get_conn()
-    c = conn.cursor()
-    c.execute("SELECT user_id, username, email FROM Users WHERE email=? AND password=?", (email, sha256(password)))
-    row = c.fetchone()
+    conn = open_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT user_id, username, email FROM Users WHERE email=? AND password=?", (email.strip(), hash_password(password)))
+    row = cur.fetchone()
     conn.close()
     return row
 
-def create_user(username: str, email: str, password: str):
-    conn = get_conn()
-    c = conn.cursor()
+def register_user(username: str, email: str, password: str):
+    conn = open_conn()
+    cur = conn.cursor()
     try:
-        c.execute("INSERT INTO Users (username, email, password, created_at) VALUES (?, ?, ?, ?)",
-                  (username, email, sha256(password), datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+        cur.execute("INSERT INTO Users (username, email, password, created_at) VALUES (?, ?, ?, ?)",
+                    (username.strip(), email.strip(), hash_password(password), datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
         conn.commit()
+        conn.close()
         return True
     except sqlite3.IntegrityError as e:
-        return "Email already registered."
-    except Exception as e:
-        return str(e)
-    finally:
         conn.close()
-
-def update_user(user_id: int, username: str, email: str, password: str = None):
-    conn = get_conn()
-    c = conn.cursor()
-    try:
-        if password:
-            c.execute("UPDATE Users SET username=?, email=?, password=? WHERE user_id=?",
-                      (username, email, sha256(password), user_id))
-        else:
-            c.execute("UPDATE Users SET username=?, email=? WHERE user_id=?",
-                      (username, email, user_id))
-        conn.commit()
-        return True
-    except Exception as e:
+        if "UNIQUE constraint failed: Users.email" in str(e):
+            return "Email already registered."
         return str(e)
-    finally:
-        conn.close()
-
-def delete_user(user_id: int):
-    conn = get_conn()
-    c = conn.cursor()
-    try:
-        c.execute("DELETE FROM Users WHERE user_id=?", (user_id,))
-        # Optional: cascade delete posts/comments of that user
-        c.execute("DELETE FROM Posts WHERE user_id=?", (user_id,))
-        c.execute("DELETE FROM Comments WHERE user_id=?", (user_id,))
-        conn.commit()
-        return True
     except Exception as e:
-        return str(e)
-    finally:
         conn.close()
-
-# Post helpers
-def create_post(user_id: int, content: str, likes: int, created_at: str):
-    conn = get_conn()
-    c = conn.cursor()
-    try:
-        c.execute("INSERT INTO Posts (user_id, content, likes, created_at) VALUES (?, ?, ?, ?)",
-                  (user_id, content, likes, created_at))
-        conn.commit()
-        return True
-    except Exception as e:
         return str(e)
-    finally:
-        conn.close()
 
-def update_post(post_id: int, content: str, likes: int):
-    conn = get_conn()
-    c = conn.cursor()
-    try:
-        c.execute("UPDATE Posts SET content=?, likes=? WHERE post_id=?", (content, likes, post_id))
-        conn.commit()
-        return True
-    except Exception as e:
-        return str(e)
-    finally:
-        conn.close()
-
-def delete_post(post_id: int):
-    conn = get_conn()
-    c = conn.cursor()
-    try:
-        c.execute("DELETE FROM Posts WHERE post_id=?", (post_id,))
-        conn.commit()
-        return True
-    except Exception as e:
-        return str(e)
-    finally:
-        conn.close()
-
-# -----------------------
-# Session state init
-# -----------------------
+# -------------------------
+# Streamlit session init
+# -------------------------
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
 if "username" not in st.session_state:
@@ -254,342 +158,294 @@ if "username" not in st.session_state:
 if "user_id" not in st.session_state:
     st.session_state.user_id = None
 
-# -----------------------
-# Login page (FULL background)
-# -----------------------
-def show_login_page():
-    # CSS for full-screen login background
-    if os.path.exists(BANNER_FILE):
-        bg = BANNER_FILE.replace("\\", "/")  # for windows path safety
-        css = f"""
-        <style>
-        .full-bg {{
-            width: 100%;
-            height: 100vh;
-            background-image: url('{bg}');
-            background-size: cover;
-            background-position: center;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-        }}
-        .overlay {{
-            position: absolute;
-            inset: 0;
-            background: rgba(0,0,0,0.45);
-            z-index: 0;
-        }}
-        .login-card {{
-            position: relative;
-            z-index: 1;
-            width: min(920px, 92%);
-            max-width: 920px;
-            background: rgba(255,255,255,0.06);
-            border-radius: 14px;
-            padding: 24px;
-            box-shadow: 0 8px 30px rgba(0,0,0,0.6);
-            backdrop-filter: blur(6px) saturate(120%);
-            color: #fff;
-            border: 1px solid rgba(255,255,255,0.06);
-        }}
-        .title {{
-            text-align:center;
-            font-size:36px;
-            font-weight:800;
-            margin-bottom:6px;
-            color:white;
-            text-shadow: 2px 4px 12px rgba(0,0,0,0.6);
-        }}
-        .subtitle {{
-            text-align:center;
-            color: rgba(255,255,255,0.9);
-            margin-bottom: 18px;
-        }}
-        </style>
-        """
-        st.markdown(css, unsafe_allow_html=True)
-        st.markdown('<div class="full-bg">', unsafe_allow_html=True)
-        st.markdown('<div class="overlay"></div>', unsafe_allow_html=True)
-        st.markdown('<div class="login-card">', unsafe_allow_html=True)
-    else:
-        # fallback: simple centered card without bg
-        st.markdown("<div style='display:flex;justify-content:center;margin-top:40px;'>", unsafe_allow_html=True)
-        st.markdown("<div style='width:720px;padding:18px;border-radius:12px;background:#f5f5f5;'>", unsafe_allow_html=True)
-        st.markdown("<h2 style='text-align:center;'>Social Media Analytics Platform</h2>", unsafe_allow_html=True)
+# -------------------------
+# LOGIN / REGISTER (clean, simple)
+# -------------------------
+def login_register_ui():
+    st.title("📊 Social Media Analytics Platform")
+    st.write("Welcome — please sign in or register to continue.")
 
-    st.markdown('<div class="title">SOCIAL MEDIA ANALYTICS PLATFORM</div>', unsafe_allow_html=True)
-    st.markdown('<div class="subtitle">Sign in to access the dashboard</div>', unsafe_allow_html=True)
+    login_tab, reg_tab = st.tabs(["🔑 Login", "🆕 Register"])
 
-    # Tabs
-    tab_login, tab_register = st.tabs(["🔑 Login", "🆕 Register"])
-
-    with tab_login:
+    with login_tab:
         with st.form("login_form"):
-            login_email = st.text_input("Email", key="login_email")
-            login_pw = st.text_input("Password", type="password", key="login_pw")
-            remember = st.checkbox("Remember me (session)")
-            submitted = st.form_submit_button("Sign In")
-            if submitted:
-                if not login_email or not login_pw:
-                    st.error("Fill both email and password.")
+            le = st.text_input("Email", key="login_email")
+            lp = st.text_input("Password", type="password", key="login_password")
+            submit_login = st.form_submit_button("Sign In")
+            if submit_login:
+                if not le or not lp:
+                    st.warning("Please fill both email and password.")
                 else:
-                    user = verify_user(login_email.strip(), login_pw)
+                    user = verify_user(le, lp)
                     if user:
                         st.session_state.logged_in = True
                         st.session_state.user_id = user[0]
-                        st.session_state.username = user[1]
-                        if remember:
-                            st.session_state["remembered_user"] = (login_email.strip(), sha256(login_pw))
-                        st.success(f"Welcome back, {user[1]}!")
-                        time.sleep(0.6)
+                        st.session_state.username = user[1] or user[2]
+                        st.success(f"Login successful — welcome {st.session_state.username}!")
                         st.experimental_rerun()
                     else:
                         st.error("Invalid email or password.")
 
-    with tab_register:
-        with st.form("register_form"):
-            reg_username = st.text_input("Username", key="reg_username")
-            reg_email = st.text_input("Email", key="reg_email")
-            reg_pw = st.text_input("Password", type="password", key="reg_pw")
-            reg_sub = st.form_submit_button("Register")
-            if reg_sub:
-                if not reg_username or not reg_email or not reg_pw:
-                    st.warning("Fill all fields.")
+    with reg_tab:
+        with st.form("reg_form"):
+            ru = st.text_input("Username", key="reg_username")
+            re = st.text_input("Email", key="reg_email")
+            rp = st.text_input("Password", type="password", key="reg_password")
+            submit_reg = st.form_submit_button("Register")
+            if submit_reg:
+                if not ru or not re or not rp:
+                    st.warning("Please fill all fields.")
                 else:
-                    res = create_user(reg_username.strip(), reg_email.strip(), reg_pw)
+                    res = register_user(ru, re, rp)
                     if res is True:
-                        st.success("Registration successful — please log in.")
+                        st.success("Registration successful. You can sign in now.")
                     else:
                         st.error(res)
 
-    # close wrappers
-    if os.path.exists(BANNER_FILE):
-        st.markdown("</div></div>", unsafe_allow_html=True)
-    else:
-        st.markdown("</div></div>", unsafe_allow_html=True)
+# if not logged in show auth UI and stop
+if not st.session_state.logged_in:
+    login_register_ui()
+    st.stop()
 
-# -----------------------
-# Main app UI (after login)
-# -----------------------
-def show_main_app():
-    # top small header
-    st.title("📊 Social Media Analytics Platform (Dashboard)")
-    # sidebar
-    with st.sidebar:
-        st.markdown(f"**👋 Logged in as**  \n**{st.session_state.username}**")
-        if st.button("Logout"):
-            st.session_state.logged_in = False
-            st.session_state.username = ""
-            st.session_state.user_id = None
-            st.experimental_rerun()
-        st.markdown("---")
-        module = st.radio("Modules", ["Database Overview", "Analytics", "Performance", "User Management", "Post Management"])
-    conn = get_conn()
+# -------------------------
+# Main app after login
+# -------------------------
+# topbar greeting
+st.markdown(f"### 👋 Welcome, **{st.session_state.username}**")
+st.write("Use the sidebar to navigate modules (Database Overview, Analytics, Performance, User Management, Post Management).")
 
-    # MODULE: Database Overview
-    if module == "Database Overview":
-        st.header("Database Overview")
-        users = pd.read_sql_query("SELECT user_id, username, email, created_at FROM Users ORDER BY user_id DESC", conn)
-        posts = pd.read_sql_query("SELECT * FROM Posts ORDER BY created_at DESC", conn)
-        st.subheader("Users")
-        st.dataframe(users)
-        st.subheader("Posts")
-        st.dataframe(posts)
+# Sidebar controls
+with st.sidebar:
+    st.markdown(f"**Logged in as:**  \n**{st.session_state.username}**")
+    if st.button("🚪 Logout"):
+        st.session_state.logged_in = False
+        st.session_state.username = ""
+        st.session_state.user_id = None
+        st.experimental_rerun()
+    st.markdown("---")
+    module = st.selectbox("Select Module", ["Database Overview", "Analytics", "Performance", "User Management", "Post Management"])
 
-    # MODULE: Analytics
-    elif module == "Analytics":
-        st.header("Analytics")
-        option = st.selectbox("Choose Analysis", ["Most Active Users", "Top Influencers", "Trending Posts"])
-        start = time.time()
-        try:
-            if option == "Most Active Users":
-                q = """
-                SELECT u.username, (COUNT(p.post_id) + COUNT(c.comment_id)) AS total_activity
+# DB connection
+conn = open_conn()
+
+# -------------------------
+# Module: Database Overview
+# -------------------------
+if module == "Database Overview":
+    st.header("User and Post Overview")
+    try:
+        users_df = pd.read_sql_query("SELECT user_id, username, email, created_at FROM Users ORDER BY user_id", conn)
+        posts_df = pd.read_sql_query("""SELECT p.post_id, p.user_id, u.username AS author, p.content, p.likes, p.created_at
+                                       FROM Posts p LEFT JOIN Users u ON p.user_id = u.user_id
+                                       ORDER BY p.created_at DESC""", conn)
+        st.subheader("👥 Users Table")
+        st.dataframe(users_df)
+        st.subheader("📝 Posts Table (shows author)")
+        st.dataframe(posts_df)
+    except Exception as e:
+        st.error(f"Failed to load overview: {e}")
+
+# -------------------------
+# Module: Analytics
+# -------------------------
+elif module == "Analytics":
+    st.header("Analytics")
+    opt = st.selectbox("Select analysis", ["Most Active Users", "Top Influencers", "Trending Posts"])
+    start = datetime.now()
+    try:
+        if opt == "Most Active Users":
+            q = """
+                SELECT u.username,
+                   (IFNULL(p.cnt,0) + IFNULL(c.cnt,0)) AS total_activity
                 FROM Users u
-                LEFT JOIN Posts p ON u.user_id = p.user_id
-                LEFT JOIN Comments c ON u.user_id = c.user_id
-                GROUP BY u.username
+                LEFT JOIN (SELECT user_id, COUNT(*) AS cnt FROM Posts GROUP BY user_id) p ON u.user_id = p.user_id
+                LEFT JOIN (SELECT user_id, COUNT(*) AS cnt FROM Comments GROUP BY user_id) c ON u.user_id = c.user_id
                 ORDER BY total_activity DESC
                 LIMIT 10;
-                """
-                df = pd.read_sql_query(q, conn)
-                if not df.empty:
-                    st.bar_chart(df.set_index("username"))
-                else:
-                    st.info("No activity.")
-            elif option == "Top Influencers":
-                q = """
-                SELECT u.username, COUNT(r.following_id) AS followers
+            """
+            df = pd.read_sql_query(q, conn)
+            if df.empty:
+                st.info("No activity yet.")
+            else:
+                st.bar_chart(df.set_index("username"))
+        elif opt == "Top Influencers":
+            q = """
+                SELECT u.username, COUNT(r.follower_id) AS followers
                 FROM Users u
-                JOIN Relationships r ON u.user_id = r.following_id
+                LEFT JOIN Relationships r ON u.user_id = r.following_id
                 GROUP BY u.username
                 ORDER BY followers DESC
                 LIMIT 10;
-                """
-                df = pd.read_sql_query(q, conn)
-                if not df.empty:
-                    st.bar_chart(df.set_index("username"))
-                else:
-                    st.info("No relationships.")
+            """
+            df = pd.read_sql_query(q, conn)
+            if df.empty:
+                st.info("No relationships recorded.")
             else:
-                q = """
-                SELECT p.post_id, p.content, (p.likes + COUNT(c.comment_id)) AS engagement_score
+                st.bar_chart(df.set_index("username"))
+        else:  # Trending Posts
+            q = """
+                SELECT p.post_id, p.content, (p.likes + IFNULL(c.cnt,0)) as engagement_score
                 FROM Posts p
-                LEFT JOIN Comments c ON p.post_id = c.post_id
-                GROUP BY p.post_id
+                LEFT JOIN (SELECT post_id, COUNT(*) as cnt FROM Comments GROUP BY post_id) c ON p.post_id = c.post_id
                 ORDER BY engagement_score DESC
-                LIMIT 5;
-                """
-                df = pd.read_sql_query(q, conn)
-                if not df.empty:
-                    st.dataframe(df)
-                else:
-                    st.info("No trending posts.")
+                LIMIT 10;
+            """
+            df = pd.read_sql_query(q, conn)
+            if df.empty:
+                st.info("No posts yet.")
+            else:
+                st.dataframe(df)
+        st.info(f"Query time: {(datetime.now() - start).total_seconds():.3f}s")
+    except Exception as e:
+        st.error(f"Analytics error: {e}")
+
+# -------------------------
+# Module: Performance
+# -------------------------
+elif module == "Performance":
+    st.header("Performance & Indexing")
+    st.write("Create indexes to speed up analytics queries (idempotent).")
+    if st.button("Create Indexes"):
+        try:
+            create_indexes(conn)
+            st.success("Indexes created (or already present).")
         except Exception as e:
-            st.error(f"Analytics error: {e}")
-        st.info(f"Query time: {round(time.time() - start, 4)}s")
-
-    # MODULE: Performance
-    elif module == "Performance":
-        st.header("Performance")
-        if st.button("Create Indexes"):
-            try:
-                create_indexes(conn)
-                st.success("Indexes created.")
-            except Exception as e:
-                st.error(f"Indexing error: {e}")
-
-    # MODULE: User Management (Add / Edit / Delete)
-    elif module == "User Management":
-        st.header("User Management")
-        tabs = st.tabs(["➕ Add User", "🖊️ Edit User", "❌ Delete User", "View Users"])
-        # Add
-        with tabs[0]:
-            with st.form("add_user_form"):
-                uname = st.text_input("Username", key="add_un")
-                uemail = st.text_input("Email", key="add_em")
-                upw = st.text_input("Password", type="password", key="add_pw")
-                sub = st.form_submit_button("Add User")
-                if sub:
-                    if not (uname and uemail and upw):
-                        st.warning("Fill all fields.")
-                    else:
-                        res = create_user(uname.strip(), uemail.strip(), upw)
-                        if res is True:
-                            st.success("User added.")
-                        else:
-                            st.error(res)
-        # Edit
-        with tabs[1]:
-            users_df = pd.read_sql_query("SELECT user_id, username, email FROM Users ORDER BY user_id DESC", conn)
-            if users_df.empty:
-                st.info("No users found.")
-            else:
-                uid = st.selectbox("Select user to edit", users_df["user_id"],
-                                   format_func=lambda x: users_df.loc[users_df["user_id"] == x, "username"].values[0])
-                user_row = users_df[users_df["user_id"] == uid].iloc[0]
-                new_un = st.text_input("Username", value=user_row["username"], key="edit_un")
-                new_em = st.text_input("Email", value=user_row["email"], key="edit_em")
-                new_pw = st.text_input("New password (leave blank to keep)", type="password", key="edit_pw")
-                if st.button("Update User"):
-                    res = update_user(uid, new_un.strip(), new_em.strip(), new_pw if new_pw else None)
-                    if res is True:
-                        st.success("User updated.")
-                    else:
-                        st.error(res)
-        # Delete
-        with tabs[2]:
-            users_df = pd.read_sql_query("SELECT user_id, username FROM Users ORDER BY user_id DESC", conn)
-            if users_df.empty:
-                st.info("No users to delete.")
-            else:
-                uid = st.selectbox("Select user to delete", users_df["user_id"],
-                                   format_func=lambda x: users_df.loc[users_df["user_id"] == x, "username"].values[0],
-                                   key="del_user_sel")
-                if st.button("Delete User"):
-                    res = delete_user(uid)
-                    if res is True:
-                        st.success("User deleted (and related posts/comments).")
-                    else:
-                        st.error(res)
-        # View
-        with tabs[3]:
-            st.dataframe(pd.read_sql_query("SELECT user_id, username, email, created_at FROM Users ORDER BY user_id DESC", conn))
-
-    # MODULE: Post Management
-    elif module == "Post Management":
-        st.header("Post Management")
-        tabs = st.tabs(["➕ Add Post", "🖊️ Edit Post", "❌ Delete Post", "View Posts"])
-        # Add
-        with tabs[0]:
-            users_df = pd.read_sql_query("SELECT user_id, username FROM Users ORDER BY user_id DESC", conn)
-            if users_df.empty:
-                st.info("No users found - add users first.")
-            else:
-                uid = st.selectbox("Select User", users_df["user_id"],
-                                   format_func=lambda x: users_df.loc[users_df["user_id"] == x, "username"].values[0], key="post_add_user")
-                content = st.text_area("Content", key="post_add_content")
-                likes = st.number_input("Likes", min_value=0, value=0, key="post_add_likes")
-                date_input = st.date_input("Date", datetime.now().date(), key="post_add_date")
-                time_str = st.text_input("Time (HH:MM:SS)", value=datetime.now().strftime("%H:%M:%S"), key="post_add_time")
-                try:
-                    datetime.strptime(time_str, "%H:%M:%S")
-                    created_at = f"{date_input} {time_str}"
-                except ValueError:
-                    created_at = None
-                    st.warning("Invalid time format. Use HH:MM:SS")
-                if st.button("Add Post"):
-                    if content and created_at:
-                        res = create_post(uid, content, int(likes), created_at)
-                        if res is True:
-                            st.success("Post added.")
-                        else:
-                            st.error(res)
-        # Edit
-        with tabs[1]:
-            posts_df = pd.read_sql_query("SELECT post_id, content FROM Posts ORDER BY post_id DESC", conn)
-            if posts_df.empty:
-                st.info("No posts.")
-            else:
-                pid = st.selectbox("Select post to edit", posts_df["post_id"],
-                                   format_func=lambda x: posts_df.loc[posts_df["post_id"] == x, "content"].values[0], key="post_edit_sel")
-                row = pd.read_sql_query("SELECT * FROM Posts WHERE post_id=?", conn, params=(pid,)).iloc[0]
-                new_content = st.text_area("Content", value=row["content"], key="post_edit_content")
-                new_likes = st.number_input("Likes", min_value=0, value=int(row.get("likes", 0)), key="post_edit_likes")
-                if st.button("Update Post"):
-                    res = update_post(pid, new_content, int(new_likes))
-                    if res is True:
-                        st.success("Post updated.")
-                    else:
-                        st.error(res)
-        # Delete
-        with tabs[2]:
-            posts_df = pd.read_sql_query("SELECT post_id, content FROM Posts ORDER BY post_id DESC", conn)
-            if posts_df.empty:
-                st.info("No posts to delete.")
-            else:
-                pid = st.selectbox("Select post to delete", posts_df["post_id"],
-                                   format_func=lambda x: posts_df.loc[posts_df["post_id"] == x, "content"].values[0], key="post_del_sel")
-                if st.button("Delete Post"):
-                    res = delete_post(pid)
-                    if res is True:
-                        st.success("Post deleted.")
-                    else:
-                        st.error(res)
-        # View
-        with tabs[3]:
-            st.dataframe(pd.read_sql_query("SELECT * FROM Posts ORDER BY created_at DESC", conn))
-
-    conn.close()
-
-# -----------------------
-# App entrypoint
-# -----------------------
-def main():
-    if not st.session_state.logged_in:
-        show_login_page()
+            st.error(f"Failed to create indexes: {e}")
+    chart_path = os.path.join(BASE_DIR, "data", "performance_chart.png")
+    if os.path.exists(chart_path):
+        st.image(chart_path, caption="Performance example")
     else:
-        show_main_app()
+        st.info("No performance chart found in /data.")
 
-if __name__ == "__main__":
-    main()
+# -------------------------
+# Module: User Management
+# -------------------------
+elif module == "User Management":
+    st.header("User Management")
+    cols = st.columns([2, 2, 1])
+    with cols[0]:
+        add_name = st.text_input("Username (new)", key="um_add_name")
+    with cols[1]:
+        add_email = st.text_input("Email (new)", key="um_add_email")
+    with cols[2]:
+        add_pw = st.text_input("Password (new)", type="password", key="um_add_pw")
+    if st.button("Add User"):
+        if not add_name or not add_email or not add_pw:
+            st.warning("Fill all fields to add a user.")
+        else:
+            res = register_user(add_name, add_email, add_pw)
+            if res is True:
+                st.success("User added.")
+            else:
+                st.error(res)
+    st.markdown("---")
+
+    # Edit / Delete existing users
+    users_df = pd.read_sql_query("SELECT user_id, username, email FROM Users ORDER BY user_id", conn)
+    if users_df.empty:
+        st.info("No users available.")
+    else:
+        sel_uid = st.selectbox("Select user for edit/delete", users_df["user_id"],
+                               format_func=lambda x: f"{users_df.loc[users_df['user_id']==x,'username'].values[0]} ({x})")
+        sel_row = users_df[users_df["user_id"] == sel_uid].iloc[0]
+        new_name = st.text_input("Edit username", value=sel_row["username"], key="um_edit_name")
+        new_email = st.text_input("Edit email", value=sel_row["email"], key="um_edit_email")
+        new_pw = st.text_input("New password (leave blank to keep)", type="password", key="um_edit_pw")
+        if st.button("Update User"):
+            try:
+                cur = conn.cursor()
+                if new_pw:
+                    cur.execute("UPDATE Users SET username=?, email=?, password=? WHERE user_id=?",
+                                (new_name.strip(), new_email.strip(), hash_password(new_pw), sel_uid))
+                else:
+                    cur.execute("UPDATE Users SET username=?, email=? WHERE user_id=?",
+                                (new_name.strip(), new_email.strip(), sel_uid))
+                conn.commit()
+                st.success("User updated.")
+            except Exception as e:
+                st.error(f"Update failed: {e}")
+        if st.button("Delete User"):
+            try:
+                conn.execute("DELETE FROM Users WHERE user_id=?", (sel_uid,))
+                conn.commit()
+                st.success("User deleted.")
+            except Exception as e:
+                st.error(f"Delete failed: {e}")
+
+    st.markdown("### Current users")
+    st.dataframe(pd.read_sql_query("SELECT user_id, username, email, created_at FROM Users ORDER BY user_id", conn))
+
+# -------------------------
+# Module: Post Management
+# -------------------------
+elif module == "Post Management":
+    st.header("Post Management")
+
+    # Add Post
+    with st.expander("➕ Add new post"):
+        users_df = pd.read_sql_query("SELECT user_id, username FROM Users ORDER BY user_id", conn)
+        if users_df.empty:
+            st.warning("No users: add users first.")
+        else:
+            u_id = st.selectbox("Select author", users_df["user_id"],
+                                format_func=lambda x: users_df.loc[users_df['user_id']==x,'username'].values[0])
+            content = st.text_area("Content")
+            likes = st.number_input("Likes", min_value=0, value=0)
+            date_val = st.date_input("Date", datetime.now().date())
+            time_val = st.time_input("Time", dtime(hour=datetime.now().hour, minute=datetime.now().minute))
+            created_at = f"{date_val} {time_val}"
+            if st.button("Add Post"):
+                try:
+                    conn.execute("INSERT INTO Posts (user_id, content, likes, created_at) VALUES (?, ?, ?, ?)",
+                                 (u_id, content, likes, created_at))
+                    conn.commit()
+                    st.success("Post added.")
+                except Exception as e:
+                    st.error(f"Failed to add post: {e}")
+
+    # Edit / Delete existing posts
+    st.markdown("---")
+    posts_df = pd.read_sql_query("""SELECT p.post_id, p.user_id, u.username AS author, p.content, p.likes, p.created_at
+                                   FROM Posts p LEFT JOIN Users u ON p.user_id = u.user_id
+                                   ORDER BY p.created_at DESC""", conn)
+    if posts_df.empty:
+        st.info("No posts available.")
+    else:
+        sel_pid = st.selectbox("Select post to edit/delete", posts_df["post_id"],
+                               format_func=lambda x: f"{posts_df.loc[posts_df['post_id']==x,'author'].values[0]} - {str(posts_df.loc[posts_df['post_id']==x,'content'].values[0])[:40]}")
+        sel_post = posts_df[posts_df["post_id"] == sel_pid].iloc[0]
+        new_content = st.text_area("Edit content", value=sel_post["content"])
+        new_likes = st.number_input("Edit likes", min_value=0, value=int(sel_post["likes"]))
+        # allow changing author
+        auth_options = posts_df["user_id"].unique().tolist()
+        try:
+            user_map = pd.read_sql_query("SELECT user_id, username FROM Users", conn)
+            # choose author from current users
+            new_author = st.selectbox("Change author (user_id)", user_map["user_id"],
+                                      index=user_map.index[user_map["user_id"]==sel_post["user_id"]].tolist()[0],
+                                      format_func=lambda x: user_map.loc[user_map['user_id']==x,'username'].values[0])
+        except Exception:
+            new_author = sel_post["user_id"]
+        if st.button("Update Post"):
+            try:
+                conn.execute("UPDATE Posts SET user_id=?, content=?, likes=? WHERE post_id=?",
+                             (new_author, new_content, new_likes, sel_pid))
+                conn.commit()
+                st.success("Post updated.")
+            except Exception as e:
+                st.error(f"Failed to update post: {e}")
+        if st.button("Delete Post"):
+            try:
+                conn.execute("DELETE FROM Posts WHERE post_id=?", (sel_pid,))
+                conn.commit()
+                st.success("Post deleted.")
+            except Exception as e:
+                st.error(f"Failed to delete post: {e}")
+
+    st.markdown("### Posts (with author)")
+    st.dataframe(posts_df)
+
+# -------------------------
+# Cleanup
+# -------------------------
+conn.close()
